@@ -1,5 +1,8 @@
 /**
  * SDGun「水弹社区」App API 类型定义
+ * ⚠️ 双副本:根目录 sdgun-api-types.ts(主文件)与 webui/src/types/sdgun-api-types.ts
+ *    (构建用副本)必须内容一致,webui 构建前会自动校验
+ *    (npm run build → scripts/check-types-sync.mjs),改任意一份后同步另一份。
  * 依据 sdgun-2026-08-24.json 抓包逆向，字段以实际样本为准；
  * 样本未覆盖到的分支以注释标注，宽松字段用 [key: string]: unknown 兜底。
  */

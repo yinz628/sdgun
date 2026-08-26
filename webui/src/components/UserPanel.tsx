@@ -132,6 +132,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
       setChatToken(token);
       if (token) {
         await pollUnread(token);
+        if (pollTimer.current) clearInterval(pollTimer.current);   // 防重复开启导致泄漏
         pollTimer.current = setInterval(() => void pollUnread(token), 5000);
       }
     } catch (e) {
@@ -198,6 +199,17 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     setActivities([]);
     setListPage(1);
     setFollowed(false);
+    // 组件按位置复用,切换用户必须重置聊天面板:否则残留上一用户的消息,
+    // 且旧的 5s 轮询 interval 引用被覆盖后永久泄漏(CORR-003/PERF-004)
+    if (pollTimer.current) {
+      clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+    seenIds.current.clear();
+    setChatOpen(false);
+    setChatToken('');
+    setChatMsgs([]);
+    setChatText('');
     (async () => {
       try {
         const h = await sdgunApi.userHome(userId);

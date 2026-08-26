@@ -59,16 +59,18 @@ export async function getJson<T>(url: string, params?: Record<string, unknown>):
   return resp.data as T;
 }
 
-/** 上游全部是表单编码 POST，无 JSON 请求体 */
+/** 上游全部是表单编码 POST,无 JSON 请求体;opts.timeout 可单独放宽(如私信的慢上游) */
 export async function postForm<T>(
   url: string,
   form: Record<string, string | number>,
+  opts?: { timeout?: number },
 ): Promise<T> {
   const body = new URLSearchParams(
     Object.entries(form).map(([k, v]) => [k, String(v)]),
   ).toString();
   const resp = await api.post(url, body, {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    timeout: opts?.timeout,
   });
   return resp.data as T;
 }

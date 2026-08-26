@@ -241,6 +241,7 @@ export const sdgunApi = {
         user_head: params.myHead ?? '',
       });
     }
-    return postForm<SendChatMsgResponse>('/msg/sendMsg', form);
+    // 上游偶发 >20s 慢响应(见函数头注释),单独放宽超时,减少"超时但实际已发出"的误报
+    return postForm<SendChatMsgResponse>('/msg/sendMsg', form, { timeout: 45000 });
   },
 };

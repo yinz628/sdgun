@@ -148,7 +148,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
             </Space>
           }
         >
-          <Form layout="vertical" onFinish={onChatFinish} initialValues={{ user_id: user?.user_id ?? 683237 }}>
+          <Form layout="vertical" onFinish={onChatFinish} initialValues={{ user_id: user?.user_id }}>
             <Form.Item label="user_id" name="user_id" rules={[{ required: true, message: '请输入 user_id' }]}>
               <InputNumber min={1} style={{ width: '100%' }} placeholder="当前登录用户 ID" />
             </Form.Item>

@@ -376,7 +376,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
           current={cPage}
           pageSize={C_STEP}
           total={cTotal}
-          onChange={(p) => { setCPage(p); if (item) void loadComments(item.id, p); }}
+          onChange={(p) => { setCPage(p); if (item) void loadComments(threadTid(item), p); }}
         />
       )}
     </Card>
