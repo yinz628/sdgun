@@ -53,11 +53,10 @@ class TestRewriteHtmlImages:
         assert 'alt="x"' in out
 
     def test_data_original_lazyload(self):
-        # 协议相对 + jquery.lazyload 空占位 src
+        # 协议相对 + jquery.lazyload 空占位 src;改写时补 https scheme(否则 /proxy 会 403)
         html = '<img src="" data-original="//bbs.sdgun.com.cn/i.png">'
         out = _rewrite_html_images(html)
-        # 现状:协议相对 URL 不补 scheme,/proxy 端点会以"仅支持 http/https"拒绝(已知缺陷)
-        assert _proxied("//bbs.sdgun.com.cn/i.png") in out
+        assert _proxied("https://bbs.sdgun.com.cn/i.png") in out
 
     def test_escaped_json_src(self):
         # var row JSON 字符串里的转义形态:src=\"http:\/\/host\/x.jpg\"

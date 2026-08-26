@@ -93,6 +93,8 @@ def _rewrite_html_images(html: str) -> str:
         clean = url.rstrip("\\").replace("\\/", "/")
         if not clean:
             return m.group(0)
+        if clean.startswith("//"):
+            clean = "https:" + clean   # 协议相对需补 scheme,否则 /proxy 白名单按非 http(s) 拒绝
         new_url = f"/proxy?url={quote(clean, safe='')}"
         if trailing_bs:
             new_url += "\\"
