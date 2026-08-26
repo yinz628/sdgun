@@ -8,10 +8,13 @@
 | 文件/目录 | 说明 |
 |---|---|
 | `API-ANALYSIS.md` | 接口逆向分析文档（7 份抓包的全部结论：鉴权、登录、搜索、写操作、WAF 指纹、频道流分页、用户主页、私信收发、评论、签到、外链证书坑等；开头有抓包索引表） |
-| `sdgun-api-types.ts` | 全部接口的 TypeScript 类型定义（类型主文件，webui 内有同步副本） |
-| `sdgun_proxy.py` | 本地 CORS 代理（FastAPI + requests） |
-| `sdgun_api_test.py` | 接口连通性测试脚本（8 个用例） |
-| `webui/` | React 18 + Ant Design 5 前端（Vite + TS） |
+| `sdgun-api-types.ts` | 全部接口的 TypeScript 类型定义（类型主文件，webui 内有同步副本，构建时自动校验一致） |
+| `sdgun_proxy.py` | 代理应用层：FastAPI 路由、转发核心、`/link` 外链跳桥、`/health` 健康探针、静态托管 |
+| `sdgun_session.py` | 会话层：上游身份头、线程安全会话存储、抓包解析、启动自检（并发探测） |
+| `sdgun_sign.py` | 每日签到：状态解析、守护线程、`/sign` 路由 |
+| `sdgun_api_test.py` | 接口连通性测试脚本（8 个用例，依赖真实会话，属诊断工具） |
+| `tests/` | 离线回归测试（pytest，不依赖网络；改动解析逻辑/升级依赖前必跑） |
+| `webui/` | React 18 + Ant Design 5 前端（Vite + TS strict） |
 | `sdgun-2026-08-2*.json` | 抓包文件（Anything Analyzer 导出；代理会自动发现并提取会话与登录记录） |
 | `sdgun_session.json` | 代理自维护的会话（自动生成，含上游 Set-Cookie 吸收） |
 | `sdgun_sign.json` | 自动签到状态（最近签到日期/结果；删掉无害，幂等） |
@@ -81,7 +84,23 @@ python deploy/deploy.py    # 一键：上传 → 构建 → 运行（需改脚�
 **HTML 图片改写**（WAP 页/threadViewPage 里直连图床的 src/data-original
 统一改走 `/proxy`，兼容 lazyload 与 var row JSON 转义形态）、
 外链跳桥（`/link?url=`，绕开 e.tb.cn 等证书不匹配域名，不携带会话 Cookie）、
-每日自动签到。
+每日自动签到、`/health` 会话健康探针（60s 缓存，`?force=1` 强制刷新，
+供 Docker HEALTHCHECK 与排障用）。
+
+## 开发与维护
+
+- **版本控制**：git 仓库（`sdgun*.json` 抓包/会话数据已在 `.gitignore` 排除，不会入库）。
+  日常改动随手 commit，上游改版时可用历史 bisect 回溯。
+- **回归测试**：`python -m pytest tests/`（全部离线）。覆盖 HTML 图片改写、
+  var row 提取、抓包 Cookie 解析、会话存储并发、/proxy 白名单守卫等最易碎的
+  解析逻辑。**升级 requests/urllib3/fastapi 前必须先跑测试**——
+  上游 WAF 校验请求头指纹、IPv4 强制依赖 urllib3 私有 API，依赖版本已在
+  `deploy/requirements.txt` 锁定，升级是有风险的决定而不是被动接受。
+- **类型双副本**：根目录 `sdgun-api-types.ts` 与 `webui/src/types/` 内副本
+  必须一致，`npm run build` 会自动校验，不一致直接构建失败。
+- **双实现同步**：`var row` 提取（Python `sdgun_sign._extract_var_row` ↔ TS
+  `media.ts extractThreadRow`）与 HTML 图片改写（`sdgun_proxy._rewrite_html_images`
+  ↔ `media.ts prepareCommentHtml`）是同一算法两份实现，上游改格式时两处必须同步。
 
 ## 登录机制
 
@@ -138,5 +157,7 @@ python deploy/deploy.py    # 一键：上传 → 构建 → 运行（需改脚�
 
 ## 依赖
 
-- Python 3.10+：`fastapi`、`uvicorn`、`requests`（代理）；`requests`（测试脚本）
-- Node 18+：前端 `npm install`（react / antd / axios / vite / typescript）
+- Python 3.10+：`fastapi`、`uvicorn`、`requests`（代理，版本已锁定见
+  `deploy/requirements.txt`）；开发另需 `pytest`（跑 `tests/`）
+- Node 18+：前端 `npm install`（react / antd / axios / vite / typescript，
+  构建走 lockfile 保持可复现）

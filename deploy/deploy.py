@@ -75,7 +75,9 @@ else:
 # ---- 3. 上传文件 ----
 print("[3] 上传文件")
 run(f"mkdir -p {REMOTE_APP} {REMOTE_DATA}", quiet=True)
-upload(os.path.join(LOCAL_ROOT, "sdgun_proxy.py"), f"{REMOTE_APP}/sdgun_proxy.py")
+# 代理三模块(sdgun_proxy 依赖 sdgun_session/sdgun_sign,漏传会 import 失败)
+for _mod in ("sdgun_proxy.py", "sdgun_session.py", "sdgun_sign.py"):
+    upload(os.path.join(LOCAL_ROOT, _mod), f"{REMOTE_APP}/{_mod}")
 upload(os.path.join(LOCAL_ROOT, "deploy", "Dockerfile"), f"{REMOTE_APP}/Dockerfile")
 upload(os.path.join(LOCAL_ROOT, "deploy", "requirements.txt"), f"{REMOTE_APP}/requirements.txt")
 n = upload_tree(os.path.join(LOCAL_ROOT, "webui", "dist"), f"{REMOTE_APP}/webui/dist")

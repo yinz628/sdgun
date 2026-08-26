@@ -1,3 +1,7 @@
-fastapi>=0.115
-uvicorn>=0.30
-requests>=2.31
+# ⚠️ 版本锁定的原因(勿随手升级):
+# 1. 上游 WAF 校验请求头指纹——requests 的头序可用,换版本/换库(httpx 等)会被判"登录信息已过期"
+# 2. IPv4 强制依赖 urllib3 私有 API(sdgun_session.py 的 allowed_gai_family 补丁)
+# 升级依赖前必须先跑回归测试:python -m pytest tests/
+fastapi==0.115.12
+uvicorn==0.34.0
+requests==2.32.5
