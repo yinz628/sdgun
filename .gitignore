@@ -1,0 +1,19 @@
+# 抓包/会话/签到状态(含登录凭据,不入库;deploy.py 会单独上传到 VPS)
+sdgun*.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/_tmp_data/
+
+# 前端构建产物与依赖(本地构建后由 deploy 上传)
+webui/node_modules/
+webui/dist/
+
+# 审查过程产物
+.workflow/
+
+# 系统
+Thumbs.db
+Desktop.ini
