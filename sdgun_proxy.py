@@ -36,7 +36,7 @@ from typing import Optional
 import requests as upstream_lib
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests.adapters import HTTPAdapter
 
 import sdgun_sign
@@ -86,7 +86,7 @@ _IMAGE_HOST_RE = (
 
 def _rewrite_html_images(html: str) -> str:
     r"""把 HTML(含 var row JSON 字符串里的转义形态)中直连图床的
-    src/data-original 改写为 /proxy?url=…,使 WAP 页图片可加载。
+    src/data-original/poster 改写为 /proxy?url=…,使 WAP 页图片/视频封面可加载。
 
     兼容形态:
       src="http://picapp.sdgun.net/x.jpg"                     普通 HTML
@@ -102,7 +102,7 @@ def _rewrite_html_images(html: str) -> str:
     from urllib.parse import quote
 
     pattern = re.compile(
-        r'(src|data-original)=(\\?)(["\'])((?:https?:)?\\?/\\?/' + _IMAGE_HOST_RE + r'[^"]*)\3',
+        r'(src|data-original|poster)=(\\?)(["\'])((?:https?:)?\\?/\\?/' + _IMAGE_HOST_RE + r'[^"]*)\3',
         re.IGNORECASE,
     )
 
@@ -183,6 +183,11 @@ async def forward(request: Request, url: str, keep_query: bool = True,
     HTML 响应会做图床 URL 改写(WAP 页图片直连图床,浏览器不可达),
     改写在线程池里执行,避免大页面的正则阻塞事件循环。
 
+    媒体流式(/proxy 路径):视频等大文件按块转发,并透传浏览器的 Range 头
+    (上游返回 206/Content-Range 原样回传)——<video> 才能快速起播、拖进度条;
+    服务端也不必把整个视频(可达几十 MB)缓冲进内存。
+    HTML 类响应仍走缓冲改写路径。
+
     并发模型:上游请求本身不加全局锁(锁会串行化整站,一张慢图拖住所有请求),
     仅会话 Cookie 的读写由 SessionStore 内部锁保护。
     """
@@ -199,18 +204,34 @@ async def forward(request: Request, url: str, keep_query: bool = True,
         url = f"{url}?{request.url.query}"
     body = await request.body()
 
+    # /proxy 承载图片与视频:一律走流式,响应阶段再按 content-type 分流
+    # (HTML 仍缓冲改写;媒体按块透传)。identity 禁压缩,保证 content-length 如实。
+    stream_mode = request.url.path == "/proxy"
+
     def do_upstream():
+        req_headers = dict(headers)
+        if stream_mode:
+            req_headers["Accept-Encoding"] = "identity"
+            range_header = request.headers.get("range")
+            if range_header:
+                req_headers["Range"] = range_header   # <video> 起播/拖进度条依赖
         try:
-            resp = upstream.request(request.method, url, headers=headers, data=body,
-                                    timeout=20, allow_redirects=follow_redirects)
+            resp = upstream.request(request.method, url, headers=req_headers, data=body,
+                                    timeout=(10, 30), allow_redirects=follow_redirects,
+                                    stream=stream_mode)
         except upstream_lib.RequestException as exc:
             return None, None, f"{type(exc).__name__}: {exc}"
         store.absorb(resp)
         # Cookie 唯一事实来源是 SessionStore;清掉 Session 自身 jar 杜绝双重簿记
         # (实测 requests 2.32.5 显式 Cookie 头优先,清 jar 是把不变式固定下来)
         upstream.cookies.clear()
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        if stream_mode and "text/html" not in content_type and not resp.headers.get("content-encoding"):
+            return resp, None, None   # 纯媒体:留给 StreamingResponse 按块透传
+        # HTML(或带压缩编码的流式响应):整块读取并按需改写
         content = resp.content
-        if "text/html" in (resp.headers.get("content-type") or "").lower():
+        if "text/html" in content_type:
             try:
                 content = _rewrite_html_images(content.decode("utf-8")).encode("utf-8")
             except (UnicodeDecodeError, ValueError):
@@ -220,6 +241,24 @@ async def forward(request: Request, url: str, keep_query: bool = True,
     resp, content, err = await run_in_threadpool(do_upstream)
     if err:
         return JSONResponse({"proxy_error": err, "upstream": url}, status_code=502)
+
+    if content is None:   # 媒体流式透传
+        passthrough = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in STRIP_RESP_HEADERS | {"content-length"}
+        }
+        passthrough["Content-Length"] = resp.headers["content-length"]
+
+        def media_iter():
+            try:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                resp.close()
+
+        return StreamingResponse(media_iter(), status_code=resp.status_code,
+                                 headers=passthrough)
 
     resp_headers = {
         k: v for k, v in resp.headers.items()

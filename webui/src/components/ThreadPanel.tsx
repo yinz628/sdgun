@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Avatar, Button, Card, Empty, Image, Input, Pagination, Popconfirm, Space, Spin, Tag, Typography, message } from 'antd';
 import { pickData, ApiError } from '../api/client';
 import { sdgunApi } from '../api/sdgun';
-import { prepareCommentHtml, proxiedImage, threadTid, extractThreadRow } from '../utils/media';
+import { prepareCommentHtml, proxiedImage, threadTid, extractThreadRow, enhanceVideos } from '../utils/media';
 import type { CommentItem, InfoFeedItem, RewardContent, RewardRecordItem, ThreadRowData } from '../types/sdgun-api-types';
 
 const C_STEP = 10;
@@ -36,6 +36,12 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
   const [liking, setLiking] = useState(false);
   const [followed, setFollowed] = useState(false);
   const [following, setFollowing] = useState(false);
+  /** 正文容器引用:渲染后对 <video> 做尺寸自适应与 HEVC 提示(enhanceVideos) */
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (contentHtml && contentRef.current) enhanceVideos(contentRef.current);
+  }, [contentHtml]);
 
   const loadComments = useCallback(async (tid: number, p: number) => {
     setCLoading(true);
@@ -242,6 +248,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       <Spin spinning={contentLoading}>
         {contentHtml ? (
           <div
+            ref={contentRef}
             className="thread-content comment-content"
             style={{
               background: '#fafafa',

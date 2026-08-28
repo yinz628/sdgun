@@ -62,6 +62,19 @@ class TestRewriteHtmlImages:
         assert _proxied("http://picapp.sdgun.net/x.jpg") in out
         assert "http:\\/\\/picapp.sdgun.net" not in out  # 原转义形态已被改写
 
+    def test_poster_attr_rewritten(self):
+        # 视频封面 poster 直连 picapp 不可达,必须一并改写(否则视频区黑框)
+        html = '<video poster="http://picapp.sdgun.net/pic/c.jpg" controls></video>'
+        out = _rewrite_html_images(html)
+        assert _proxied("http://picapp.sdgun.net/pic/c.jpg") in out
+        assert "poster=\"/proxy?url=" in out
+
+    def test_poster_escaped_json_form(self):
+        # var row JSON 里的转义形态(video 标记实际出现的位置)
+        html = 'var row = {"content": "<video poster=\\"http:\\/\\/picapp.sdgun.net\\/pic\\/d.jpg\\">"}'
+        out = _rewrite_html_images(html)
+        assert _proxied("http://picapp.sdgun.net/pic/d.jpg") in out
+
     def test_already_proxied_untouched(self):
         html = f'<img src="{_proxied("http://picapp.sdgun.net/a.jpg")}">'
         assert _rewrite_html_images(html) == html

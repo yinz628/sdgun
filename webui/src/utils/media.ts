@@ -61,12 +61,17 @@ export function prepareCommentHtml(html: string): string {
       : tag.replace(/^<img/i, `<img src="${proxiedImage(real)}"`);
     return withSrc.replace(/\sdata-original="[^"]*"/i, '');
   });
-  // 2) 其余已有 src 的绝对地址图也走代理
+  // 2) 其余已有 src 的绝对地址图也走代理(含 <source>/<video> src)
   out = out.replace(/\ssrc="(https?:\/\/[^"]+)"/gi, (m, url: string) => {
     if (isProxied(url)) return m;
     return ` src="${proxiedImage(decodeEntities(url))}"`;
   });
-  // 3) 链接：改写 href + 新标签打开
+  // 3) 视频封面 poster 也直连不可达,同样改走代理
+  out = out.replace(/\sposter="(https?:\/\/[^"]+)"/gi, (m, url: string) => {
+    if (isProxied(url)) return m;
+    return ` poster="${proxiedImage(decodeEntities(url))}"`;
+  });
+  // 4) 链接：改写 href + 新标签打开
   out = out.replace(/<a\b[^>]*>/gi, (tag) => {
     const hrefMatch = /\shref="([^"]*)"/i.exec(tag);
     if (!hrefMatch) return tag;
@@ -90,6 +95,7 @@ export function threadTid(item: InfoFeedItem): number {
 /**
  * 从 threadViewPage HTML 提取内嵌的 var row = {...}（含正文 content）。
  * 用花括号配对 + 字符串状态扫描定位 JSON 边界，避免正则贪婪问题。
+ * （与 sdgun_sign.py 的 _extract_var_row 为双实现,上游改格式需两处同步）
  */
 export function extractThreadRow(html: string): ThreadRowData | null {
   const anchor = html.indexOf('var row =');
@@ -119,4 +125,44 @@ export function extractThreadRow(html: string): ThreadRowData | null {
     }
   }
   return null;
+}
+
+/**
+ * 正文渲染后的 <video> 后处理（dangerouslySetInnerHTML 之后调用一次）：
+ *  - 尺寸自适应容器（WAP 标记写死 width=800px/height=600px,会撑破面板）
+ *  - HEVC(H.265) 检测:桌面 Chrome/Edge 无系统 HEVC 解码时视频轨解不出来
+ *    （只剩声音）,此时保留声音播放并在视频下方挂提示条:
+ *    「下载原片」用本地播放器看 / 指引安装系统 HEVC 扩展。
+ *    服务端不做转码:VPS 仅 2 vCPU,HEVC 软解+H.264 编码达不到实时。
+ */
+export function enhanceVideos(container: HTMLElement): void {
+  const hevcSupported = document.createElement('video')
+    .canPlayType('video/mp4; codecs="hvc1"') !== '';
+  container.querySelectorAll('video').forEach((v) => {
+    const el = v as HTMLVideoElement;
+    el.style.maxWidth = '100%';
+    el.style.height = 'auto';
+    if (hevcSupported) return;
+
+    const src = el.currentSrc
+      || el.querySelector('source')?.getAttribute('src')
+      || el.getAttribute('src') || '';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'margin:4px 0;padding:6px 10px;background:#fffbe6;'
+      + 'border:1px solid #ffe58f;border-radius:6px;font-size:12px;line-height:1.7;';
+    const label = document.createElement('span');
+    label.textContent = '该视频为 HEVC(H.265)编码,当前浏览器无法解码画面(声音不受影响)。';
+    bar.appendChild(label);
+    if (src) {
+      const link = document.createElement('a');
+      link.href = src;            // /proxy?url=… 同源,download 属性有效
+      link.download = '';
+      link.textContent = '下载原片用本地播放器观看';
+      bar.appendChild(link);
+    }
+    const tip = document.createElement('span');
+    tip.textContent = src ? ';或在 Windows 安装「HEVC 视频扩展」后浏览器可直接播放。' : '可安装系统 HEVC 解码支持后重试。';
+    bar.appendChild(tip);
+    el.insertAdjacentElement('afterend', bar);
+  });
 }
