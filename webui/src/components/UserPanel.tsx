@@ -484,8 +484,9 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
             </Button>
           </Space.Compact>
           <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-            接口：/msg/sendMsg（每 5 秒轮询 /msg/unReadMsg 收新消息）。
-            历史消息接口未知（App 内由环信长连接同步），此处仅显示打开后收发的消息。
+            接口：/msg/sendMsg（每 5 秒轮询 /msg/unReadMsg 收新消息；打开会话时会先收一次未读）。
+            未读消息拉取即清（与 App 共用消费池）、无历史消息接口（App 走环信长连接），
+            故仅显示打开后收发的消息。
           </Typography.Paragraph>
         </Spin>
       </Modal>

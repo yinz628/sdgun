@@ -14,6 +14,7 @@
 | 5 | sdgun-2026-08-25.json | 501 | 频道流翻页 + 用户主页 + 私信入口 | feed 分页 = totalList 游标 + content_id；用户主页接口族 |
 | 6 | sdgun-2026-08-25-2.json | 66 | 发送私信 | sendMsg：sign 必须存在但不验内容；unReadMsg 即消息源 |
 | 7 | sdgun-2026-08-26.json | 266 | 发表评论 + 看链接帖 | replyAdd；外链证书坑（/link 跳桥）；WAP 页图片改写 |
+| 8 | sdgun-2026-08-29.json | 45 | 私信回复收发全链路 | unReadMsg 拉取即清（修正附录 5）；chatToken 稳定；重登不影响网页会话（附录 8） |
 
 运维要点速查：会话三个 Cookie / 重放登录（App 内重新登录会使旧 token 失效，点网页「登录」恢复）/
 自动签到（每日 08:05 UTC+8）/ 上游必须 requests（WAF 头序）/ 图片与外链全走代理路由。
@@ -488,3 +489,49 @@ WAP 页自己的 CSS/JS 是相对路径，天然走代理。
 处置：抓包目录放入含新登录记录的 sdgun-2026-08-26.json → 本地/VPS 各执行一次
 `POST /auth/replay-exact` → 均成功换得新会话；VPS 会话已同步回本地。
 重放有效期进一步确认：跨天（前一天录的包次日重放成功）。
+
+## 附录 8：第八份抓包（sdgun-2026-08-29.json，45 条）——私信回复收发全链路复核
+
+> 场景：App 收到用户 599715（小豆苗）回复「没有了 被预定了」→ App 内重新登录
+> （第 9 条记录）→ 换发新 chatToken → 发送「好，谢谢」。整条私信链路在一份抓包里闭环。
+
+### 1. 发送实现逐字段复核（与附录 5 对照）
+
+真实 sendMsg 表单与本网页实现（`sdgunApi.sendChatMsg`）逐字段一致：
+`app_key / data[body_type]=1 / data[content]={"text":…} / data[method]=sendMsgToUser /
+data[msg_id]=<秒>.<微秒> / data[time_stamp] / data[to_user_id]=user<uid> / data[ext] /
+timestamp / token / type=user / user_id`。
+差异仅两处且均无影响：真实 `sign`/`sign2` 是 32 位十六进制（非全零）——但换新 token 后
+全零假签名依旧发送成功，"只验存在性"结论再次证实；`data[ext]` 真实端恒带，网页端登录态下也恒带。
+
+### 2. unReadMsg 消费语义修正（修正附录 5）
+
+附录 5 曾记「轮询不消费（多次拉取返回相同消息）」。本次时间线：
+
+```
+#14 unReadMsg(tok=132915aa) → msgs=[小豆苗的回复 18:14]
+#21 unReadMsg(tok=132915aa) → msgs=[]   ← 首次拉取后即消失
+#29/#32/#37 unReadMsg       → msgs=[]
+```
+
+两份抓包合并后的结论：**收到的消息首次拉取即被消费**（谁先拉谁拿到，App 与网页端共用
+同一 chatToken 消费池）；附录 5 观察到的"重复返回"应是自己发出的消息（self-sent
+不属于未读，会持续在列）。对网页端的影响：
+- 打开会话时的首次 `pollUnread` 能接到「App 尚未读走」的回复（UserPanel 已实现）；
+- 一旦被 App 或网页拉走，该消息从服务端消失——页面刷新后无法找回（无历史接口），
+  这就是 UI 仅显示"打开后收发的消息"的根本原因，属上游限制而非缺陷。
+
+### 3. chatToken 稳定性与重登影响
+
+- `repairChatAndResToken` 在网页端换出的 token（fc283d76…）与 App 端最新抓包完全一致
+  ——该接口是"取当前生效 token"而非"签发新 token"，重复调用无副作用。
+- App 重新登录后，旧 chatToken（132915aa…）在一段时间内仍能调用 unReadMsg（本抓包
+  #21/#29 仍返回 200），新 token 并行有效；最终以 repairChatAndResToken 取到的为准。
+- App 内重新登录（#9 的 POST user/login）后，代理网页会话经 `/health` 实测仍 ok
+  ——主站 Cookie 多点共存结论再次证实，无需重放登录。
+
+### 4. groupMsgCount（仅记录，无实现价值）
+
+`GET /msg/groupMsgCount?app_key&token&user_id`，本抓包 5 次调用与实测均返回 `[]`
+（无群消息时的空数组），非空结构仍未见到。暂无前端落地价值。
+
