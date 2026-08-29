@@ -33,11 +33,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-import requests as upstream_lib
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from requests.adapters import HTTPAdapter
 
 import sdgun_messages
 import sdgun_sign
@@ -49,6 +47,7 @@ from sdgun_session import (
     DATA_DIR,
     find_login_record,
     store,
+    upstream_client,
 )
 
 if not logging.getLogger().handlers:   # 允许宿主(uvicorn/测试)自带日志配置
@@ -127,13 +126,9 @@ def _rewrite_html_images(html: str) -> str:
 
 # ============================ 应用与生命周期 ============================
 
-upstream = upstream_lib.Session()
-upstream.headers.update(APP_HEADERS)
-# 并发放大连接池(默认 pool_maxsize=10,图片密集页并发转发时会报 pool full 丢连接):
-# 会话锁已收窄到 cookie 读写,转发本身可并发(见 forward)
-_adapter = HTTPAdapter(pool_connections=8, pool_maxsize=32)
-upstream.mount("https://", _adapter)
-upstream.mount("http://", _adapter)
+# 上游客户端:共用 sdgun_session.upstream_client(带连接级重试 + 放大连接池;
+# 会话锁已收窄到 cookie 读写,转发本身可并发)
+upstream = upstream_client
 
 
 @asynccontextmanager
@@ -219,7 +214,7 @@ async def forward(request: Request, url: str, keep_query: bool = True,
                 req_headers["Range"] = range_header   # <video> 起播/拖进度条依赖
         try:
             resp = upstream.request(request.method, url, headers=req_headers, data=body,
-                                    timeout=(10, 30), allow_redirects=follow_redirects,
+                                    timeout=(15, 30), allow_redirects=follow_redirects,
                                     stream=stream_mode)
         except upstream_lib.RequestException as exc:
             return None, None, f"{type(exc).__name__}: {exc}"
@@ -299,9 +294,9 @@ async def auth_replay_exact():
 
     def do():
         try:
-            resp = upstream_lib.post(rec["url"], headers=rec["headers"],
-                                     data=rec["body"].encode("utf-8"),
-                                     timeout=20, allow_redirects=False)
+            resp = upstream_client.post(rec["url"], headers=rec["headers"],
+                                        data=rec["body"].encode("utf-8"),
+                                        timeout=(15, 30), allow_redirects=False)
         except upstream_lib.RequestException as exc:
             return None, f"{type(exc).__name__}: {exc}"
         store.absorb(resp)
@@ -412,9 +407,9 @@ async def link_through(request: Request, url: Optional[str] = None):
             warnings.filterwarnings("ignore")  # 屏蔽 verify=False 的 InsecureRequestWarning
             current = url
             for _ in range(5):  # 最多跟 5 跳
-                resp = upstream_lib.get(current, timeout=20, allow_redirects=False,
-                                        verify=False,
-                                        headers={"User-Agent": APP_HEADERS["User-Agent"]})
+                resp = upstream_client.get(current, timeout=(15, 30), allow_redirects=False,
+                                           verify=False,
+                                           headers={"User-Agent": APP_HEADERS["User-Agent"]})
                 if 300 <= resp.status_code < 400 and resp.headers.get("location"):
                     nxt = urljoin(current, resp.headers["location"])
                     if _up(nxt).netloc.lower() == _up(current).netloc.lower():

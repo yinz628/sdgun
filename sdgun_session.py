@@ -25,6 +25,8 @@ from typing import Optional
 
 import requests as upstream_lib
 import urllib3.util.connection
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger("sdgun.session")
 
@@ -63,6 +65,28 @@ DATA_DIR = os.environ.get("SDGUN_DATA_DIR", BASE_DIR)
 
 def _cookie_header_of(jar: dict) -> str:
     return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+
+def make_upstream_session() -> upstream_lib.Session:
+    """带连接级重试的上游会话(2026-08-29 故障加固)。
+
+    connect 失败自动重试 2 次(0.5s/1s 退避)——上游七牛 CDN 会轮换 IP,
+    偶发坏边缘/瞬时抖动时一次 TCP 超时不该让整个页面报错;每次重试都重新
+    解析 DNS,可落到新 IP。read/status 阶段绝不重试(read=0),保证 POST
+    (发评论/发私信)不会因超时被重复发送。连接级重试对 WAF 指纹透明。
+    """
+    s = upstream_lib.Session()
+    s.headers.update(APP_HEADERS)
+    retry = Retry(total=2, connect=2, read=0, status=0, backoff_factor=0.5)
+    adapter = HTTPAdapter(pool_connections=8, pool_maxsize=32, max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+# 全进程共用的上游客户端(转发/会话校验/签到共用;显式 Cookie 头优先,响应
+# Set-Cookie 一律经 SessionStore.absorb 落库,session jar 不承担会话职责)
+upstream_client = make_upstream_session()
 
 
 # ============================ 会话存储 ============================
@@ -139,10 +163,10 @@ class SessionStore:
         if AUTH_COOKIE_NAME not in (jar or {}):
             return False
         try:
-            r = upstream_lib.get(
+            r = upstream_client.get(
                 MAIN_ORIGIN + "/mag/index/v1/Index/jsApi",
                 headers=dict(APP_HEADERS, Cookie=_cookie_header_of(jar)),
-                timeout=15,
+                timeout=(15, 20),
             )
             return bool(r.json().get("_USER"))
         except Exception:  # noqa: BLE001 —— 校验失败一律视为无效

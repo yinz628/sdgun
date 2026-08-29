@@ -123,22 +123,30 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
   const searching = keyword.length > 0;
 
   // 1) 启动：拉首页框架解析栏目 + 版块树 + 热门搜索词
+  //    栏目是整页的骨架,失败自动重试一次(上游 CDN 偶发瞬时抖动),再失败才报错
   useEffect(() => {
     (async () => {
       setTabsLoading(true);
       const defs: TabDef[] = [];
-      try {
-        const resp = await sdgunApi.indexPages();
-        const frag = JSON.parse(resp.index_fragment) as IndexFragmentItem[];
-        for (const f of frag) {
-          if (f.column_type === 7)
-            defs.push({ key: `ch-${f.id}`, kind: 'channel', id: Number(f.id), name: f.name });
-          else if (f.column_type === 1)
-            defs.push({ key: `cat-${f.id}`, kind: 'cat', id: Number(f.id), name: f.name });
+      const loadIndexPages = async (retried: boolean): Promise<void> => {
+        try {
+          const resp = await sdgunApi.indexPages();
+          const frag = JSON.parse(resp.index_fragment) as IndexFragmentItem[];
+          for (const f of frag) {
+            if (f.column_type === 7)
+              defs.push({ key: `ch-${f.id}`, kind: 'channel', id: Number(f.id), name: f.name });
+            else if (f.column_type === 1)
+              defs.push({ key: `cat-${f.id}`, kind: 'cat', id: Number(f.id), name: f.name });
+          }
+        } catch (e) {
+          if (!retried) {
+            await new Promise((r) => setTimeout(r, 3000));
+            return loadIndexPages(true);
+          }
+          message.error(`栏目加载失败：${(e as ApiError).message}`);
         }
-      } catch (e) {
-        message.error(`栏目加载失败：${(e as ApiError).message}`);
-      }
+      };
+      await loadIndexPages(false);
       try {
         // 版块树（分组 → 版块 fid）；频道信息流服务端不分页，版块浏览走 threadList（真实分页）
         const tree = await sdgunApi.circleTree();

@@ -27,7 +27,7 @@ import requests as upstream_lib
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
-from sdgun_session import APP_HEADERS, MAIN_ORIGIN, store
+from sdgun_session import APP_HEADERS, MAIN_ORIGIN, store, upstream_client
 
 logger = logging.getLogger("sdgun.sign")
 
@@ -130,10 +130,10 @@ def _extract_var_row(html: str) -> Optional[dict]:
 def _sign_view_row() -> Optional[dict]:
     """拉签到状态页并解析 var row(需有效会话)。"""
     try:
-        r = upstream_lib.get(
+        r = upstream_client.get(
             MAIN_ORIGIN + "/mag/addon/v1/sign/signView",
             headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
-            timeout=20,
+            timeout=(15, 20),
         )
         store.absorb(r)
     except upstream_lib.RequestException as exc:
@@ -159,11 +159,11 @@ def _run_sign(manual: bool = False) -> dict:
                           today_count=row.get("today_sign_count"))
         else:
             try:
-                r = upstream_lib.get(
+                r = upstream_client.get(
                     MAIN_ORIGIN + "/mag/addon/v1/sign/signReward",
                     params={"uid": row["user_id"]},
                     headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
-                    timeout=20,
+                    timeout=(15, 20),
                 )
                 store.absorb(r)
                 payload = r.json()
