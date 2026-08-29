@@ -1,6 +1,7 @@
 import { api, getJson, postForm } from './client';
 import type {
   ChannelConfigResponse,
+  ChatMsgItem,
   ChatUnreadMsgResponse,
   CommentListResponse,
   DayReadFinishResponse,
@@ -167,6 +168,16 @@ export const sdgunApi = {
       step: 100,
       token: chatToken,
       user_id: `user${userId}`,
+    }),
+
+  /**
+   * 本地归档的私信历史（代理 /messages/local，自归档功能部署起累积）。
+   * 上游无历史接口且 unReadMsg 拉取即清（附录 8），归档是网页端唯一的历史来源。
+   */
+  localMessages: (peerId?: string, limit = 500) =>
+    getJson<{ msgs: ChatMsgItem[]; total: number }>('/messages/local', {
+      peer_id: peerId,
+      limit,
     }),
 
   /* ===== 用户主页（第四份抓包 sdgun-2026-08-25） ===== */

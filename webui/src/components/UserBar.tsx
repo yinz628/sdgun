@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Avatar, Button, Popover, Space, Spin, Tag, Typography, message } from 'antd';
+import { Alert, Avatar, Badge, Button, Popover, Space, Spin, Tag, Typography, message } from 'antd';
 import { sdgunApi } from '../api/sdgun';
 import { ApiError, PROXY_BASE } from '../api/client';
 import { proxiedImage } from '../utils/media';
 import type { JsApiUser } from '../types/sdgun-api-types';
 
-/** 顶栏：当前用户（jsApi）+ 会话 Cookie 设置（存 localStorage，经代理 X-Sdgun-Cookie 生效） */
-export default function UserBar({ onUserChange }: { onUserChange: (u: JsApiUser | null) => void }) {
+interface Props {
+  onUserChange: (u: JsApiUser | null) => void;
+  /** 全局监听累计的未读私信数(点击私信按钮清零) */
+  unread?: number;
+  onClearUnread?: () => void;
+}
+
+/** 顶栏：当前用户（jsApi）+ 私信角标 + 会话 Cookie 设置（存 localStorage，经代理 X-Sdgun-Cookie 生效） */
+export default function UserBar({ onUserChange, unread = 0, onClearUnread }: Props) {
   const [user, setUser] = useState<JsApiUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -111,6 +118,17 @@ export default function UserBar({ onUserChange }: { onUserChange: (u: JsApiUser 
             </Button>
           </>
         )}
+
+        <Badge count={unread} size="small" offset={[-2, 2]}>
+          <Button
+            onClick={() => {
+              onClearUnread?.();
+              message.info(unread > 0 ? '已清除新私信提醒(消息在代理侧已归档,打开对方面板可见)' : '暂无新私信提醒');
+            }}
+          >
+            私信
+          </Button>
+        </Badge>
 
         <Popover
           open={open}

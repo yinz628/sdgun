@@ -1,0 +1,9 @@
+2026-08-29 19:50:17,765 sdgun.proxy INFO [webui] 已托管前端构建产物: F:\rchang\sdgun\webui\dist → http://127.0.0.1:8000/
+INFO:     Started server process [7820]
+INFO:     Waiting for application startup.
+2026-08-29 19:50:18,197 sdgun.session INFO [session] 使用 sdgun_session.json 的会话(jsApi 校验通过)
+2026-08-29 19:50:18,197 sdgun.sign INFO [sign] 自动签到已被 SDGUN_AUTO_SIGN=0 关闭
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8126 (Press CTRL+C to quit)
+INFO:     127.0.0.1:49981 - "GET /messages/local?limit=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49982 - "GET /messages/local?peer_id=user599715 HTTP/1.1" 200 OK

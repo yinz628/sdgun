@@ -39,6 +39,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests.adapters import HTTPAdapter
 
+import sdgun_messages
 import sdgun_sign
 from sdgun_session import (
     APP_HEADERS,
@@ -148,6 +149,7 @@ app = FastAPI(title="SDGun CORS Proxy", docs_url=None, redoc_url=None,
               lifespan=lifespan)
 
 app.include_router(sdgun_sign.router)
+app.include_router(sdgun_messages.router)
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -236,6 +238,13 @@ async def forward(request: Request, url: str, keep_query: bool = True,
                 content = _rewrite_html_images(content.decode("utf-8")).encode("utf-8")
             except (UnicodeDecodeError, ValueError):
                 pass  # 非 UTF-8 的 HTML 原样返回
+        # 私信归档钩子:unReadMsg 拉取即清(附录 8),经过代理的每条消息先落本地库,
+        # "历史记录"才能从部署起累积;解析失败静默,绝不影响转发本身
+        if content and request.url.path.startswith("/msg/"):
+            try:
+                sdgun_messages.absorb_upstream(request.url.path, content, sdgun_messages.store)
+            except Exception as exc:  # noqa: BLE001 —— 归档失败只告警
+                logger.warning("[messages] 归档钩子异常: %s", exc)
         return resp, content, None
 
     resp, content, err = await run_in_threadpool(do_upstream)

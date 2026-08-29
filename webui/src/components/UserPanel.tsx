@@ -79,7 +79,6 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
   const [chatText, setChatText] = useState('');
   const [sending, setSending] = useState(false);
   const seenIds = useRef<Set<number>>(new Set());
-  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const peerId = `user${userId}`;
   const myId = me ? `user${me.user_id}` : '';
@@ -118,7 +117,9 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     [me, mergeMsgs],
   );
 
-  /** 打开聊天：换取 chatToken → 拉一次未读 → 每 5s 轮询 */
+  /** 打开聊天:本地归档历史 → 换 chatToken → 补拉一次未读。
+   *  后续新消息由 App 层的全局监听器(15s 轮询)经 sdgun-incoming-msgs 事件推送,
+   *  本面板不再自建 interval(避免泄漏与双重消费)。 */
   const openChat = async () => {
     setChatOpen(true);
     if (!me) {
@@ -127,14 +128,14 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     }
     setChatLoading(true);
     try {
+      try {
+        const hist = await sdgunApi.localMessages(`user${userId}`);
+        mergeMsgs(hist.msgs);
+      } catch { /* 归档缺失不阻塞聊天 */ }
       const rt = await sdgunApi.repairChatToken(me.user_id);
       const token = rt.data?.chatToken ?? '';
       setChatToken(token);
-      if (token) {
-        await pollUnread(token);
-        if (pollTimer.current) clearInterval(pollTimer.current);   // 防重复开启导致泄漏
-        pollTimer.current = setInterval(() => void pollUnread(token), 5000);
-      }
+      if (token) await pollUnread(token);
     } catch (e) {
       message.error(`聊天凭证获取失败：${(e as ApiError).message}`);
     } finally {
@@ -144,15 +145,21 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
 
   const closeChat = () => {
     setChatOpen(false);
-    if (pollTimer.current) {
-      clearInterval(pollTimer.current);
-      pollTimer.current = null;
-    }
   };
 
   useEffect(() => () => {
-    if (pollTimer.current) clearInterval(pollTimer.current);
+    seenIds.current.clear();
   }, []);
+
+  // 订阅全局监听器的新消息事件(chatOpen 关闭时忽略,消息已在代理侧归档)
+  useEffect(() => {
+    const onIncoming = (e: Event) => {
+      const msgs = (e as CustomEvent<ChatMsgItem[]>).detail ?? [];
+      if (chatOpen && msgs.length) mergeMsgs(msgs);
+    };
+    window.addEventListener('sdgun-incoming-msgs', onIncoming);
+    return () => window.removeEventListener('sdgun-incoming-msgs', onIncoming);
+  }, [chatOpen, mergeMsgs]);
 
   /** 发送私信（sign 固定假值；上游偶发慢响应，超时不代表失败 → 刷新未读确认） */
   const doSend = async () => {
@@ -199,12 +206,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     setActivities([]);
     setListPage(1);
     setFollowed(false);
-    // 组件按位置复用,切换用户必须重置聊天面板:否则残留上一用户的消息,
-    // 且旧的 5s 轮询 interval 引用被覆盖后永久泄漏(CORR-003/PERF-004)
-    if (pollTimer.current) {
-      clearInterval(pollTimer.current);
-      pollTimer.current = null;
-    }
+    // 组件按位置复用,切换用户必须重置聊天面板(残留消息/会话态会串到下一用户)
     seenIds.current.clear();
     setChatOpen(false);
     setChatToken('');
@@ -484,9 +486,8 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
             </Button>
           </Space.Compact>
           <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-            接口：/msg/sendMsg（每 5 秒轮询 /msg/unReadMsg 收新消息；打开会话时会先收一次未读）。
-            未读消息拉取即清（与 App 共用消费池）、无历史消息接口（App 走环信长连接），
-            故仅显示打开后收发的消息。
+            历史来自代理本地归档（/messages/local，自部署起累积）；新消息由全局监听每 15 秒
+            轮询推送。上游未读拉取即清、无历史接口（App 走环信长连接），App 先读走的消息无法归档。
           </Typography.Paragraph>
         </Spin>
       </Modal>
