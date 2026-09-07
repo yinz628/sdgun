@@ -54,9 +54,9 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
     } catch (e) {
       setComments([]);
       const ae = e as ApiError;
-      // 上游 502「您的网络有些问题」文案有误导性：实测与本站网络无关（游客态同样失败），
-      // 是站方接口对该帖服务失败（2026-09 起新帖批量出现），提示里说清这一点
-      const reason = ae.code === 502 ? '站方接口暂时无法提供该帖评论（非本站网络问题）' : ae.message;
+      // 上游对「tid 不存在/不可见」统一报 code=502「您的网络有些问题」（对照实测：
+      // 从不存在的 tid/远古空洞与被删帖错误签名完全一致），文案极具误导性，此处纠偏
+      const reason = ae.code === 502 ? '帖子不存在或已不可见（可能刚被删除或审核中），并非网络问题' : ae.message;
       message.error(`评论加载失败：${reason}`);
     } finally {
       setCLoading(false);
@@ -277,7 +277,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
           !contentLoading &&
           (contentError ? (
             <Typography.Text type="warning">
-              站方接口暂时无法提供该帖正文（非本站网络问题，常见于刚发表的新帖或站方故障期间）；标题/作者/评论不受影响
+              该帖已不可访问（可能发表后即被删除、审核中或不存在）；标题/作者来自列表缓存仍可见
             </Typography.Text>
           ) : (
             <Typography.Text type="secondary">
