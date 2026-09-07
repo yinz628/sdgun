@@ -7,7 +7,7 @@
 
 | 文件/目录 | 说明 |
 |---|---|
-| `API-ANALYSIS.md` | 接口逆向分析文档（7 份抓包的全部结论：鉴权、登录、搜索、写操作、WAF 指纹、频道流分页、用户主页、私信收发、评论、签到、外链证书坑等；开头有抓包索引表） |
+| `API-ANALYSIS.md` | 接口逆向分析文档（8 份抓包 + 线上实测的全部结论：鉴权、登录、搜索、写操作、WAF 指纹、频道流分页、用户主页、私信收发、评论、签到、外链证书坑、502「帖子不存在」语义等；开头有抓包索引表） |
 | `sdgun-api-types.ts` | 全部接口的 TypeScript 类型定义（类型主文件，webui 内有同步副本，构建时自动校验一致） |
 | `sdgun_proxy.py` | 代理应用层：FastAPI 路由、转发核心、`/link` 外链跳桥、`/health` 健康探针、静态托管 |
 | `sdgun_session.py` | 会话层：上游身份头、线程安全会话存储、抓包解析、启动自检（并发探测） |
@@ -20,7 +20,7 @@
 | `sdgun_session.json` | 代理自维护的会话（自动生成，含上游 Set-Cookie 吸收） |
 | `sdgun_sign.json` | 自动签到状态（最近签到日期/结果；删掉无害，幂等） |
 | `启动.bat` | Windows 一键启动（0.0.0.0:8000 并显示局域网地址） |
-| `deploy/` | VPS Docker 部署（Dockerfile + requirements + deploy.py 一键脚本） |
+| `deploy/` | VPS Docker 部署（Dockerfile + requirements + `deploy.py` 全量脚本 + `update_dist.py` 前端增量脚本） |
 
 ## 快速开始
 
@@ -55,8 +55,13 @@ cd webui && npm run dev   # http://localhost:5173
 ### Docker 部署到服务器（已部署至 192.168.2.197:50002）
 
 ```bash
-python deploy/deploy.py    # 一键：上传 → 构建 → 运行（需改脚本里的主机/密码）
+python deploy/deploy.py         # 全量：上传代码+数据 → 构建 → 运行（需改脚本里的主机/密码）
+python deploy/update_dist.py    # 前端增量：只更新 webui/dist 并重建容器（秒级）
 ```
+
+> ⚠️ **只改了前端时用 `update_dist.py`**。`deploy.py` 会把本地所有 `sdgun*.json`
+> （含 `sdgun_session.json`）盖到服务器数据卷——本机的会话文件可能早已过期，
+> 全量上传会把 VPS 上仍有效的会话覆盖成失效会话，整站变"登录信息已过期"。
 
 服务器上的布局与运维：
 
@@ -76,7 +81,7 @@ python deploy/deploy.py    # 一键：上传 → 构建 → 运行（需改脚�
    allowed_gai_family 补丁），容器同时禁用了 IPv6。
 
 更新会话/抓包：把新 JSON 放到 `/opt/sdgun/data/` 后 `docker restart sdgun`。
-更新代码：改本地文件后重跑 `deploy/deploy.py`。
+更新代码：改本地文件后重跑 `deploy/deploy.py`；只改前端则跑 `deploy/update_dist.py`。
 签到状态文件 `sdgun_sign.json` 也在 data 卷（删掉会重签检查一次，幂等无害）。
 
 代理职责：CORS 放行、注入 App 身份头（UA/mag-version/X-Requested-With/Referer）、
@@ -164,6 +169,10 @@ python deploy/deploy.py    # 一键：上传 → 构建 → 运行（需改脚�
 
 ## 已知限制与注意事项
 
+- **上游把「帖子不存在/不可见」统一报成 `code=502「您的网络有些问题」`**（JSON 接口
+  与正文页错误页同一文案）。列表里偶见的「0 阅读、无正文」帖即是：发表后很快被删除、
+  审核中或其它不可见状态——feed 是发布瞬间抓到的，点击时帖子已不可见。
+  该文案与网络无关，前端已对 code=502 做文案纠偏（详见 API-ANALYSIS.md 附录 9）。
 - **上游 WAF 校验请求头指纹**：转发必须用 requests（httpx 的默认头序会被判
   "登录信息已过期"），详见 API-ANALYSIS.md 附录 3。
 - 评论/正文为服务端富文本 HTML，当前直接渲染；公网部署前需接 DOMPurify 消毒。
