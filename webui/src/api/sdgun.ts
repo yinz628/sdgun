@@ -118,16 +118,20 @@ export const sdgunApi = {
       content_id: params.contentIds?.length ? params.contentIds.join(',') : undefined,
     }),
 
-  /** 帖子评论（分页） */
-  comments: (tid: number, p = 1, step = 10) =>
-    getJson<CommentListResponse>('/mag/circle/v2/Forum/commentList', {
-      tid,
-      fid: 0,
-      order: 2,
-      p,
-      step,
-      authorid: 0,
-    }),
+  /**
+   * 帖子评论（分页）。v2 失败自动回落 v1：两者参数/响应结构逐字段一致
+   * （2026-09-07 对照实测：count/列表/分页/排序完全相同），但站方故障时
+   * 两者的可用面不同——v2 对当日新帖批量 502「您的网络有些问题」，v1 不受影响；
+   * 反向差异也可能出现，故 v2 优先、失败才走 v1，而非直接切换。
+   */
+  comments: async (tid: number, p = 1, step = 10): Promise<CommentListResponse> => {
+    const params = { tid, fid: 0, order: 2, p, step, authorid: 0 };
+    try {
+      return await getJson<CommentListResponse>('/mag/circle/v2/Forum/commentList', params);
+    } catch (e) {
+      return getJson<CommentListResponse>('/mag/circle/v1/Forum/commentList', params);
+    }
+  },
 
   /** 发表评论（circle_id 来自 threadViewPage 的 var row；成功后 data 即新评论） */
   addComment: (tid: number | string, content: string, circleId?: string | number) =>

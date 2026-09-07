@@ -25,6 +25,8 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
   const [rrLoading, setRrLoading] = useState(false);
   const [contentHtml, setContentHtml] = useState('');
   const [contentLoading, setContentLoading] = useState(false);
+  /** threadViewPage 返回了站方错误页（上游 502 等），正文确实取不到——与"本来就没有正文"区分开 */
+  const [contentError, setContentError] = useState(false);
   /** 楼主信息（threadViewPage 的 var row 里有 user_id/user_name/user_head） */
   const [author, setAuthor] = useState<{ id: string; name: string; head: string } | null>(null);
   /** 发评论用的 circle_id（var row.circle_id） */
@@ -51,7 +53,11 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       setCTotal(resp.count ?? 0);
     } catch (e) {
       setComments([]);
-      message.error(`评论加载失败：${(e as ApiError).message}`);
+      const ae = e as ApiError;
+      // 上游 502「您的网络有些问题」文案有误导性：实测与本站网络无关（游客态同样失败），
+      // 是站方接口对该帖服务失败（2026-09 起新帖批量出现），提示里说清这一点
+      const reason = ae.code === 502 ? '站方接口暂时无法提供该帖评论（非本站网络问题）' : ae.message;
+      message.error(`评论加载失败：${reason}`);
     } finally {
       setCLoading(false);
     }
@@ -67,6 +73,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
     setLiked(false);
     setFollowed(false);
     setContentHtml('');
+    setContentError(false);
     setAuthor(null);
     setCircleId('');
     setCommentText('');
@@ -77,6 +84,12 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       sdgunApi
         .fetchThreadHtml(tid)
         .then((html) => {
+          // 站方错误页也是 200 + HTML（含 error 样式表/「您的网络有些问题」文案），
+          // 必须在这里识别，否则会被当成"没有正文"静默吞掉
+          if (html.includes('css/user/error-') || html.includes('您的网络有些问题')) {
+            setContentError(true);
+            return;
+          }
           const row: ThreadRowData | null = extractThreadRow(html);
           setContentHtml(prepareCommentHtml(row?.content ?? ''));
           if (row?.user_id) {
@@ -261,11 +274,16 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
             dangerouslySetInnerHTML={{ __html: contentHtml }}
           />
         ) : (
-          !contentLoading && (
+          !contentLoading &&
+          (contentError ? (
+            <Typography.Text type="warning">
+              站方接口暂时无法提供该帖正文（非本站网络问题，常见于刚发表的新帖或站方故障期间）；标题/作者/评论不受影响
+            </Typography.Text>
+          ) : (
             <Typography.Text type="secondary">
               无正文内容（可能为付费/隐藏帖或纯图帖）
             </Typography.Text>
-          )
+          ))
         )}
       </Spin>
 
