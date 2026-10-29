@@ -46,8 +46,11 @@ export const sdgunApi = {
   /** 当前登录用户（jsApi，含主站 token） */
   currentUser: () => getJson<JsApiResponse>('/mag/index/v1/Index/jsApi'),
 
-  /** 首页框架：栏目 Tab（index_fragment 是 JSON 字符串，需二次 parse） */
-  indexPages: () => getJson<IndexPagesResponse>('/mag/index/v2/index/pages'),
+  /** 首页框架：栏目 Tab（index_fragment 是 JSON 字符串，需二次 parse）。
+   *  opts.retry === false 关闭 client 内建重试——FeedList 首屏自带 3s 递归重试，
+   *  两层叠加会最坏发 4 次请求，这里让组件那层成为唯一重试层。 */
+  indexPages: (opts?: { retry?: boolean }) =>
+    getJson<IndexPagesResponse>('/mag/index/v2/index/pages', undefined, opts),
 
   /** 频道配置：含频道名与分类列表 data.info_config[] */
   channelConfig: (channelId: number) =>

@@ -1,4 +1,4 @@
-import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
+import axios, { AxiosError, type AxiosRequestConfig, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { emitTokenRequired, getToken, TOKEN_REQUIRED_MSG } from '../utils/token';
 
 /**
@@ -19,6 +19,16 @@ export class ApiError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * 请求级自定义开关（axios 原样透传 config，响应拦截器读取）：
+ *  __noRetry  关闭 GET 幂等内建重试（见 getJson / 响应拦截器）
+ *  __retried  拦截器内部标记：已重试过一次，防无限重试
+ */
+export type SdgunRequestConfig = AxiosRequestConfig & {
+  __noRetry?: boolean;
+  __retried?: boolean;
+};
 
 /**
  * 后端地址：
@@ -62,9 +72,11 @@ api.interceptors.response.use(
     }
     // GET 幂等:上游直连偶发丢包耗尽代理重试后表现为 502/网络错误/超时——
     // 静默重试一次即可消除大部分"偶发加载失败"的体感;POST(评论/私信/点赞等
-    // 真实写操作)绝不重试,避免重复提交
-    const cfg = error.config as (InternalAxiosRequestConfig & { __retried?: boolean }) | undefined;
-    if (cfg && cfg.method === 'get' && !cfg.__retried) {
+    // 真实写操作)绝不重试,避免重复提交。
+    // __noRetry:调用方自带重试(如 FeedList 首屏 3s 递归重试)时关掉这层,
+    // 否则两层叠加最坏发 4 次请求——韧性由调用方那层提供,叠加消除。
+    const cfg = error.config as SdgunRequestConfig | undefined;
+    if (cfg && cfg.method === 'get' && !cfg.__retried && !cfg.__noRetry) {
       cfg.__retried = true;
       await new Promise((r) => setTimeout(r, 800));
       return api.request(cfg);
@@ -74,8 +86,19 @@ api.interceptors.response.use(
   },
 );
 
-export async function getJson<T>(url: string, params?: Record<string, unknown>): Promise<T> {
-  const resp = await api.get(url, { params });
+/**
+ * GET 幂等请求（统一走 api 实例的拦截器）。
+ * opts.retry === false 时关闭响应拦截器里的内建重试（默认开启）——供调用方
+ * 自己承担重试（如 FeedList 首屏的 3s 递归重试），避免两层重试叠加。
+ */
+export async function getJson<T>(
+  url: string,
+  params?: Record<string, unknown>,
+  opts?: { retry?: boolean },
+): Promise<T> {
+  const cfg: SdgunRequestConfig = { params };
+  if (opts?.retry === false) cfg.__noRetry = true;
+  const resp = await api.get(url, cfg);
   return resp.data as T;
 }
 

@@ -65,14 +65,16 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
   const searching = keyword.length > 0;
 
   // 1) 启动：拉首页框架解析栏目 + 版块树 + 热门搜索词
-  //    栏目是整页的骨架,失败自动重试一次(上游 CDN 偶发瞬时抖动),再失败才报错
+  //    栏目是整页的骨架,失败自动重试一次(上游 CDN 偶发瞬时抖动),再失败才报错。
+  //    这里带 { retry: false } 关掉 client 内建重试:本组件这层 3s 递归重试就是
+  //    唯一重试层,否则两层叠加最坏发 4 次请求(韧性不变,叠加消除)。
   useEffect(() => {
     (async () => {
       setTabsLoading(true);
       const defs: TabDef[] = [];
       const loadIndexPages = async (retried: boolean): Promise<void> => {
         try {
-          const resp = await sdgunApi.indexPages();
+          const resp = await sdgunApi.indexPages({ retry: false });
           const frag = JSON.parse(resp.index_fragment) as IndexFragmentItem[];
           for (const f of frag) {
             if (f.column_type === 7)
