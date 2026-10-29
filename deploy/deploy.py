@@ -8,6 +8,7 @@
 
 用法:
   SDGUN_DEPLOY_PASSWORD=... python deploy/deploy.py
+  SDGUN_DEPLOY_PASSWORD=... python deploy/deploy.py --yes   # 自动化:跳过数据覆盖确认
 """
 import os
 import sys
@@ -17,7 +18,34 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import deploy_common as dc
 
 
+def _data_files() -> list[str]:
+    """本机待上传覆盖 VPS 数据卷的 sdgun*.json(排序保证清单稳定)。"""
+    return sorted(f for f in os.listdir(dc.LOCAL_ROOT)
+                  if f.startswith("sdgun") and f.endswith(".json"))
+
+
+def _confirm_data_overwrite(files: list[str]) -> None:
+    """全量部署前交互确认:这些文件会覆盖 VPS 数据卷上的同名文件。
+
+    VPS 上仍有效的会话文件一旦被本机(可能已过期)的同名文件覆盖,整站会变
+    "登录信息已过期"。日常更新一律用 update_dist.py(不碰数据卷);只有首次部署
+    或确认要整体重置(含换会话数据)时才继续。--yes 供自动化跳过。
+    """
+    print("[3a] ⚠ 即将上传以下数据文件覆盖 VPS 数据卷(可能把有效会话盖成过期):")
+    for f in files:
+        print(f"      {f}")
+    print("      VPS 上仍有效的会话会被本机(可能过期的)文件覆盖,"
+          "整站可能变「登录信息已过期」。")
+    try:
+        reply = input("      确认覆盖请输入 y 继续(其它任意键中止):").strip().lower()
+    except EOFError:   # 非交互环境(无 stdin)一律视为未确认
+        reply = ""
+    if reply not in ("y", "yes"):
+        sys.exit("已中止:未覆盖 VPS 数据卷。日常更新请用 deploy/update_dist.py")
+
+
 def main():
+    assume_yes = "--yes" in sys.argv
     ssh = dc.connect()
 
     # ---- 2. 环境检查 ----
@@ -39,10 +67,12 @@ def main():
     n = dc.upload_tree(ssh, os.path.join(dc.LOCAL_ROOT, "webui", "dist"),
                        f"{dc.REMOTE_APP}/webui/dist")
     print(f"    前端构建产物 {n} 个文件")
-    for f in os.listdir(dc.LOCAL_ROOT):
-        if f.startswith("sdgun") and f.endswith(".json"):
-            dc.upload(ssh, os.path.join(dc.LOCAL_ROOT, f), f"{dc.REMOTE_DATA}/{f}")
-            print(f"    数据文件 {f}")
+    data_files = _data_files()
+    if data_files and not assume_yes:
+        _confirm_data_overwrite(data_files)
+    for f in data_files:
+        dc.upload(ssh, os.path.join(dc.LOCAL_ROOT, f), f"{dc.REMOTE_DATA}/{f}")
+        print(f"    数据文件 {f}")
 
     # ---- 4/5. 构建并换容器 ----
     print("[4] 构建镜像")
