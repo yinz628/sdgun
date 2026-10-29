@@ -3,8 +3,9 @@
 
 覆盖对象是上游改版/依赖升级时最先无声坏掉的解析逻辑:
   _rewrite_html_images   WAP 页图片 URL 改写(4 种形态)
-  _extract_var_row       threadViewPage 内嵌 var row JSON 提取(在 sdgun_sign,
-                          与 webui/src/utils/media.ts 的 extractThreadRow 为双实现,改格式需两处同步)
+  _extract_var_row       threadViewPage 内嵌 var row JSON 提取(单源化到 sdgun_parse,
+                          与 webui/src/utils/media.ts 的 extractThreadRow 为过渡回落)
+  threadViewPage 信封     ?sdgun_parsed=1 opt-in:剥参转发 + 服务端解析 + JSON 信封
   extract_capture_jar    抓包文件 Cookie 提取(sdgun_session)
   capture_files          抓包文件发现(排除状态文件)
   /proxy 白名单          通用代理的目标守卫
@@ -110,6 +111,89 @@ class TestExtractVarRow:
 
     def test_unterminated_returns_none(self):
         assert _extract_var_row('var row = {"a": 1') is None
+
+
+# ============================ threadViewPage 服务端解析信封 ============================
+
+# 含 var row 的 WAP 页:正文里的图片是 src 属性(由 _rewrite_html_images 处理),
+# user_head/pics[].url 是纯字段 URL(由 proxify_images 补齐代理化)
+_THREAD_HTML = (
+    '<html><body>'
+    '<img src="http://picapp.sdgun.net/pic/a.jpg">'
+    '<script>var row = {"tid": "42", "circle_id": "7", '
+    '"user_head": "https://picapp.sdgun.net/avatar/u.png", '
+    '"pics": [{"url": "http://picapp.sdgun.net/pic/b.jpg"}, '
+    '{"url": "https://mag1.sdgun.net/keep.png"}], '
+    '"content": "<img src=\\"http:\\/\\/picapp.sdgun.net\\/pic\\/c.jpg\\">"};</script>'
+    '</body></html>'
+)
+
+_NO_ROW_HTML = '<html><body><p>没有 var row 的页面</p></body></html>'
+
+
+class TestThreadViewEnvelope:
+    """/mag/circle/v1/forum/threadViewPage?sdgun_parsed=1 opt-in 信封(阶段5)。"""
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def _patch_upstream(self, monkeypatch, html: str, seen: dict):
+        def fake_request(method, url, **kwargs):
+            seen["url"] = url
+            return _buffered_resp(200, {"Content-Type": "text/html; charset=utf-8"},
+                                  html.encode("utf-8"))
+        monkeypatch.setattr(sdgun_proxy.upstream, "request", fake_request)
+
+    def test_envelope_parses_and_proxifies_images(self, client, monkeypatch):
+        seen: dict = {}
+        self._patch_upstream(monkeypatch, _THREAD_HTML, seen)
+        r = client.get("/mag/circle/v1/forum/threadViewPage",
+                       params={"tid": 42, "sdgun_parsed": 1})
+        assert r.status_code == 200
+        assert "application/json" in r.headers["content-type"]
+        env = r.json()
+        row = env["parsed_row"]
+        # 纯字段 URL 由 proxify_images 代理化;非图床域(mag1)保持原样
+        assert row["user_head"] == _proxied("https://picapp.sdgun.net/avatar/u.png")
+        assert row["pics"][0]["url"] == _proxied("http://picapp.sdgun.net/pic/b.jpg")
+        assert row["pics"][1]["url"] == "https://mag1.sdgun.net/keep.png"
+        # content 里的图片(转义 JSON 形态)已由 _rewrite_html_images 改写
+        assert _proxied("http://picapp.sdgun.net/pic/c.jpg") in row["content"]
+        # html 字段是改写后的原始 HTML,同样含被代理的 src
+        assert _proxied("http://picapp.sdgun.net/pic/a.jpg") in env["html"]
+        # 剥参:上游收到的 URL 不含 sdgun_parsed,但保留其它参数
+        assert "sdgun_parsed" not in seen["url"]
+        assert "tid=42" in seen["url"]
+
+    def test_envelope_null_when_no_row(self, client, monkeypatch):
+        seen: dict = {}
+        self._patch_upstream(monkeypatch, _NO_ROW_HTML, seen)
+        r = client.get("/mag/circle/v1/forum/threadViewPage",
+                       params={"tid": 1, "sdgun_parsed": 1})
+        env = r.json()
+        assert env["parsed_row"] is None
+        assert "没有 var row" in env["html"]
+
+    def test_without_flag_returns_raw_html(self, client, monkeypatch):
+        # 回归:不带参数 = 现状原样透传 HTML(帖内站内链接的同源渲染依赖它)
+        seen: dict = {}
+        self._patch_upstream(monkeypatch, _THREAD_HTML, seen)
+        r = client.get("/mag/circle/v1/forum/threadViewPage", params={"tid": 42})
+        assert "text/html" in r.headers["content-type"]
+        assert "parsed_row" not in r.text
+        assert _proxied("http://picapp.sdgun.net/pic/a.jpg") in r.text
+        assert "var row =" in r.text
+        assert "sdgun_parsed" not in seen["url"]
+
+    def test_flag_on_other_route_is_not_intercepted(self, client, monkeypatch):
+        # 只有精确 threadViewPage 才进信封;其它 /mag 路由即使带参数也原样转发
+        seen: dict = {}
+        self._patch_upstream(monkeypatch, _NO_ROW_HTML, seen)
+        r = client.get("/mag/index/v1/Index/jsApi", params={"sdgun_parsed": 1})
+        assert "text/html" in r.headers["content-type"]
+        assert "sdgun_parsed=1" in seen["url"]   # 非目标路由:参数原样透传
 
 
 # ============================ capture_files / extract_capture_jar(sdgun_session) ============================

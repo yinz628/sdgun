@@ -37,9 +37,11 @@ App 头自动补充:User-Agent(MAGAPPX) / mag-version / X-Requested-With / Refer
 import hmac
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
+from urllib.parse import parse_qsl, quote, urlencode
 
 import requests as upstream_lib
 from fastapi import FastAPI, Request
@@ -52,6 +54,7 @@ import sdgun_messages
 import sdgun_sign
 import sdgun_uistate
 import sdgun_watch
+from sdgun_parse import extract_var_row, proxify_images
 from sdgun_session import (
     APP_HEADERS,
     AUTH_COOKIE_NAME,
@@ -137,6 +140,46 @@ def _rewrite_html_images(html: str) -> str:
         return f"{attr}={esc}{quote_ch}{new_url}{quote_ch}"
 
     return pattern.sub(to_proxy, html)
+
+
+# ============================ threadViewPage 服务端解析信封(阶段5 双路过渡) ============================
+
+# 前端请求 threadViewPage 时带 ?sdgun_parsed=1 触发 opt-in 信封:
+#   ①剥掉该参数转发给上游(上游不认识它);②对返回 HTML 照常改写图片;
+#   ③服务端提取 var row + 代理化其中的纯字段图片 URL;④返回 JSON 信封
+#   {"parsed_row": {...}|null, "html": "<改写后的原始 HTML>"}。
+# 不带参数的请求 = 现状原样透传 HTML——帖内站内链接的"WAP 页同源渲染"依赖
+# 该路由的 HTML 形态,绝不能被无条件改变,故用查询参数做开关而非改路由行为。
+_PARSED_ROUTE = "/mag/circle/v1/forum/threadViewPage"
+_PARSED_FLAG = "sdgun_parsed"
+
+
+def _query_has_parsed_flag(query: str) -> bool:
+    """查询串是否含 sdgun_parsed=1(解析为键值对判定,避免子串误命中)。"""
+    return any(k == _PARSED_FLAG and v == "1"
+               for k, v in parse_qsl(query, keep_blank_values=True))
+
+
+def _strip_parsed_flag(query: str) -> str:
+    """剥掉 sdgun_parsed 参数后的查询串(其余参数原样保留)。"""
+    return urlencode([(k, v) for k, v in parse_qsl(query, keep_blank_values=True)
+                      if k != _PARSED_FLAG])
+
+
+def _to_proxy_url(url: str) -> str:
+    """图床 URL → /proxy?url=(与 _rewrite_html_images 的 to_proxy 同形)。
+
+    协议相对(//host/…)补 https,否则 /proxy 白名单按非 http(s) 拒绝。
+    """
+    clean = "https:" + url if url.startswith("//") else url
+    return f"/proxy?url={quote(clean, safe='')}"
+
+
+def _is_image_host_url(url: str) -> bool:
+    """是否命中图床域且尚未被代理(供 proxify_images 注入;域名知识留在本模块)。"""
+    if "/proxy?url=" in url:
+        return False
+    return bool(re.search(_IMAGE_HOST_RE, url, re.IGNORECASE))
 
 
 # ============================ 应用与生命周期 ============================
@@ -318,8 +361,16 @@ async def forward(request: Request, url: str, keep_query: bool = True,
     if cookie:
         headers["Cookie"] = cookie
 
+    # opt-in 信封:仅精确匹配 threadViewPage 且查询含 sdgun_parsed=1(路径与查询
+    # 串分离判定,大小写敏感)。命中时剥参转发,响应阶段再包装成 JSON 信封。
+    parsed_mode = (keep_query
+                   and request.url.path == _PARSED_ROUTE
+                   and _query_has_parsed_flag(request.url.query))
+
     if keep_query and request.url.query:
-        url = f"{url}?{request.url.query}"
+        query = _strip_parsed_flag(request.url.query) if parsed_mode else request.url.query
+        if query:
+            url = f"{url}?{query}"
     body = await request.body()
 
     # /proxy 承载图片与视频:一律走流式,响应阶段再按 content-type 分流
@@ -338,7 +389,7 @@ async def forward(request: Request, url: str, keep_query: bool = True,
                                     timeout=UPSTREAM_TIMEOUT, allow_redirects=follow_redirects,
                                     stream=stream_mode)
         except upstream_lib.RequestException as exc:
-            return None, None, f"{type(exc).__name__}: {exc}"
+            return None, None, f"{type(exc).__name__}: {exc}", None
         store.absorb(resp)
         # Cookie 唯一事实来源是 SessionStore;清掉 Session 自身 jar 杜绝双重簿记
         # (实测 requests 2.32.5 显式 Cookie 头优先,清 jar 是把不变式固定下来)
@@ -346,12 +397,14 @@ async def forward(request: Request, url: str, keep_query: bool = True,
 
         content_type = (resp.headers.get("content-type") or "").lower()
         if stream_mode and "text/html" not in content_type and not resp.headers.get("content-encoding"):
-            return resp, None, None   # 纯媒体:留给 StreamingResponse 按块透传
+            return resp, None, None, None   # 纯媒体:留给 StreamingResponse 按块透传
         # HTML(或带压缩编码的流式响应):整块读取并按需改写
         content = resp.content
+        html_text = None
         if "text/html" in content_type:
             try:
-                content = _rewrite_html_images(content.decode("utf-8")).encode("utf-8")
+                html_text = _rewrite_html_images(content.decode("utf-8"))
+                content = html_text.encode("utf-8")
             except (UnicodeDecodeError, ValueError):
                 pass  # 非 UTF-8 的 HTML 原样返回
         # 私信归档钩子:unReadMsg 拉取即清(附录 8),经过代理的每条消息先落本地库,
@@ -361,11 +414,25 @@ async def forward(request: Request, url: str, keep_query: bool = True,
                 sdgun_messages.absorb_upstream(request.url.path, content, sdgun_messages.store)
             except Exception as exc:  # noqa: BLE001 —— 归档失败只告警
                 logger.warning("[messages] 归档钩子异常: %s", exc)
-        return resp, content, None
+        if parsed_mode and html_text is not None:
+            # 从"已改写图片"的 HTML 提取 var row:content 等 HTML 字段里的图片已由
+            # _rewrite_html_images 处理;row 里纯字段形式的图片 URL(user_head/
+            # pics[].url 等)再由 proxify_images 补齐。提取失败 → parsed_row=null,
+            # html 仍完整返回,前端可回落自提取。
+            row = extract_var_row(html_text)
+            if row is not None:
+                row = proxify_images(row, _to_proxy_url, _is_image_host_url)
+            return resp, None, None, {"parsed_row": row, "html": html_text}
+        return resp, content, None, None
 
-    resp, content, err = await run_in_threadpool(do_upstream)
+    resp, content, err, envelope = await run_in_threadpool(do_upstream)
     if err:
         return JSONResponse({"proxy_error": err, "upstream": url}, status_code=502)
+
+    if envelope is not None:
+        # 信封走 JSONResponse:Content-Type=application/json,并经外层 CORS/缓存
+        # 中间件(与普通响应同路径)。上游状态码原样透传(含错误页 502 → 信封 null)。
+        return JSONResponse(envelope, status_code=resp.status_code)
 
     if content is None:   # 媒体流式透传
         passthrough = {

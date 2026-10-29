@@ -55,10 +55,10 @@ DOCKER_RUN = (
     f"-v {REMOTE_DATA}:/data sdgun"
 )
 
-# 代理九模块(sdgun_proxy 依赖 sdgun_session/sdgun_store/sdgun_sign/sdgun_messages/sdgun_likes/sdgun_favorites/sdgun_watch/sdgun_uistate,漏传会 import 失败)
+# 代理十模块(sdgun_proxy 依赖 sdgun_session/sdgun_store/sdgun_sign/sdgun_messages/sdgun_likes/sdgun_favorites/sdgun_watch/sdgun_uistate/sdgun_parse,漏传会 import 失败)
 PY_MODULES = ("sdgun_proxy.py", "sdgun_session.py", "sdgun_store.py", "sdgun_sign.py",
               "sdgun_messages.py", "sdgun_likes.py", "sdgun_favorites.py",
-              "sdgun_watch.py", "sdgun_uistate.py")
+              "sdgun_watch.py", "sdgun_uistate.py", "sdgun_parse.py")
 DEPLOY_FILES = ("Dockerfile", "requirements.txt")
 
 
