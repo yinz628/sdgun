@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Alert, Badge, Button, Card, Col, Descriptions, Form, InputNumber, Row, Select, Space, Tag, Typography, message } from 'antd';
-import { ApiError, api } from '../api/client';
+import { api } from '../api/client';
 import { sdgunApi } from '../api/sdgun';
+import { toastErr } from '../utils/toast';
 import type { JsApiUser } from '../types/sdgun-api-types';
 
 /** 代理侧签到接口（非上游业务包裹，无 success 字段） */
@@ -45,7 +46,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
       const resp = await api.get<SignStatus>('/sign/status');
       setSignStatus(resp.data);
     } catch (e) {
-      message.error(`签到状态获取失败：${(e as ApiError).message}`);
+      toastErr('签到状态获取失败', e);
     } finally {
       setSignLoading(false);
     }
@@ -66,7 +67,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
       }
       await loadSignStatus();
     } catch (e) {
-      message.error(`签到失败：${(e as ApiError).message}`);
+      toastErr('签到失败', e);
     } finally {
       setSignRunning(false);
     }
@@ -79,7 +80,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
       const resp = await sdgunApi.dayReadFinish();
       message.success(resp.is_finish ? '今日阅读任务已完成' : '上报成功');
     } catch (e) {
-      message.error(`上报失败：${(e as ApiError).message}`);
+      toastErr('上报失败', e);
     } finally {
       setReadSubmitting(false);
     }
@@ -95,7 +96,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
       setUnread(null);
       message.success(`chatToken 已获取：${token.slice(0, 8)}…`);
     } catch (e) {
-      message.error(`获取 chatToken 失败：${(e as ApiError).message}`);
+      toastErr('获取 chatToken 失败', e);
     } finally {
       setChatSubmitting(false);
     }
@@ -109,7 +110,7 @@ export default function OpsForms({ user }: { user: JsApiUser | null }) {
       setUnread(resp.unRead);
       message.info(`当前未读私信：${resp.unRead}`);
     } catch (e) {
-      message.error(`查询未读失败：${(e as ApiError).message}`);
+      toastErr('查询未读失败', e);
     } finally {
       setUnreadLoading(false);
     }

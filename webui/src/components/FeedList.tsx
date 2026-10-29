@@ -4,15 +4,15 @@ import {
   Space, Tag, Typography, message,
 } from 'antd';
 import { sdgunApi } from '../api/sdgun';
-import { ApiError } from '../api/client';
 import { proxiedImage } from '../utils/media';
 import { sanitizeHtml } from '../utils/sanitize';
+import { searchItemToFeed, threadListItemToFeed } from '../utils/adapters';
+import { toastErr } from '../utils/toast';
 import type {
   ChannelCatItem,
   IndexFragmentItem,
   InfoFeedItem,
   SearchThreadItem,
-  ThreadListItem,
   UserSearchItem,
 } from '../types/sdgun-api-types';
 
@@ -34,68 +34,6 @@ interface Props {
   onSelect: (item: InfoFeedItem) => void;
   /** 用户搜索结果点击头像/昵称 → 打开用户主页 */
   onOpenUser: (userId: number, name?: string) => void;
-}
-
-/** 搜索条目 → 信息流条目（右侧详情面板复用同一结构；threadTid 走 link 解析） */
-function searchItemToFeed(s: SearchThreadItem): InfoFeedItem {
-  return {
-    id: Number(s.tid),
-    title: s.subject,
-    pic_type: s.pics?.length ? 1 : 0,
-    pics_arr: (s.pics ?? []).map((u) => ({ url: u, tburl: u, width: 0, height: 0 })),
-    from: `${s.user_name}　${s.click}阅读`,
-    source: s.user_name,
-    click: `${s.click}阅读`,
-    publish_time_str: s.dateline,
-    label: '',
-    label_id: null,
-    link: s.link,
-    type: 2,
-    type_value: s.tid,
-    user_id: s.user_id,
-    user_name: s.user_name,
-    forum_name: s.forum_name,
-    des: '',
-    tags: [],
-    video_url: null,
-    is_vote: -1,
-    goods_info: '',
-    is_voice: -1,
-    is_live: null,
-    pics_count: s.pics?.length ?? 0,
-    cover_type: 1,
-  } as unknown as InfoFeedItem;
-}
-
-/** 版块帖子 → 信息流条目（右侧详情面板复用同一结构） */
-function threadListItemToFeed(t: ThreadListItem): InfoFeedItem {
-  return {
-    id: Number(t.tid),
-    title: t.subject,
-    pic_type: (t.pics?.length ?? 0) > 0 ? 1 : 0,
-    pics_arr: (t.pics ?? []).map((p) => ({ url: p.url, tburl: p.tburl, width: 0, height: 0 })),
-    from: `${t.user_name}　${t.click}阅读`,
-    source: t.user_name,
-    click: `${t.click}阅读`,
-    publish_time_str: t.dateline,
-    label: '',
-    label_id: null,
-    link: `/mag/circle/v1/forum/threadViewPage?tid=${t.tid}`,
-    type: 2,
-    type_value: t.tid,
-    user_id: t.user_id,
-    user_name: t.user_name,
-    forum_name: undefined,
-    des: t.des || '',
-    tags: [],
-    video_url: null,
-    is_vote: -1,
-    goods_info: '',
-    is_voice: -1,
-    is_live: null,
-    pics_count: t.pics_count ?? (t.pics?.length ?? 0),
-    cover_type: 1,
-  } as unknown as InfoFeedItem;
 }
 
 /** 左侧：搜索（帖子/用户）+ 栏目下拉 + 信息流列表 + 分页 */
@@ -147,7 +85,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
             await new Promise((r) => setTimeout(r, 3000));
             return loadIndexPages(true);
           }
-          message.error(`栏目加载失败：${(e as ApiError).message}`);
+          toastErr('栏目加载失败', e);
         }
       };
       await loadIndexPages(false);
@@ -192,7 +130,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
         setCats(list);
         setCatId(list[0]?.cat_id ?? 2);
       } catch (e) {
-        message.error(`频道分类加载失败：${(e as ApiError).message}`);
+        toastErr('频道分类加载失败', e);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -220,7 +158,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
         } catch (e) {
           setItems([]);
           setUserResults([]);
-          message.error(`搜索失败：${(e as ApiError).message}`);
+          toastErr('搜索失败', e);
         } finally {
           setLoading(false);
         }
@@ -240,7 +178,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
           if (page > 1 && list.length === 0) message.info('没有更多内容了');
         } catch (e) {
           setItems([]);
-          message.error(`版块加载失败：${(e as ApiError).message}`);
+          toastErr('版块加载失败', e);
         } finally {
           setLoading(false);
         }
@@ -273,7 +211,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
         if (page > 1 && (resp.list ?? []).length === 0) message.info('没有更多内容了');
       } catch (e) {
         setItems([]);
-        message.error(`信息流加载失败：${(e as ApiError).message}`);
+        toastErr('信息流加载失败', e);
       } finally {
         setLoading(false);
       }
@@ -289,7 +227,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
       message.success(resp.code === 100 ? `已关注 ${u.name}` : `${u.name} 之前已关注`);
       setFollowedIds((prev) => new Set(prev).add(u.user_id));
     } catch (e) {
-      message.error(`关注失败：${(e as ApiError).message}`);
+      toastErr('关注失败', e);
     } finally {
       setFollowingId(null);
     }

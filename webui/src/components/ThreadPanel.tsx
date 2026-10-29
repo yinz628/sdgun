@@ -3,6 +3,7 @@ import { Avatar, Button, Card, Empty, Image, Input, Pagination, Popconfirm, Spac
 import { pickData, ApiError } from '../api/client';
 import { sdgunApi } from '../api/sdgun';
 import { proxiedImage, threadTid, extractThreadRow, enhanceVideos, renderRichText } from '../utils/media';
+import { toastErr } from '../utils/toast';
 import type { CommentItem, InfoFeedItem, RewardContent, RewardRecordItem, ThreadRowData } from '../types/sdgun-api-types';
 
 const C_STEP = 10;
@@ -109,7 +110,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
           }
           if (row?.circle_id != null) setCircleId(row.circle_id as string | number);
         })
-        .catch((e) => message.error(`正文加载失败：${(e as ApiError).message}`))
+        .catch((e) => toastErr('正文加载失败', e))
         .finally(() => setContentLoading(false));
     }
   }, [item, loadComments]);
@@ -129,7 +130,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       setCPage(1);
       void loadComments(threadTid(item), 1);
     } catch (e) {
-      message.error(`评论失败：${(e as ApiError).message}`);
+      toastErr('评论失败', e);
     } finally {
       setCommentSubmitting(false);
     }
@@ -146,7 +147,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
         data.length ? `红包内容 ${data.length} 条` : '该帖无红包/悬赏内容',
       );
     } catch (e) {
-      message.error(`红包查询失败：${(e as ApiError).message}`);
+      toastErr('红包查询失败', e);
     } finally {
       setRLoading(false);
     }
@@ -163,7 +164,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       // 本地归档(上游无"我的点赞"接口;失败静默,不影响点赞本身)
       sdgunApi.likesAdd(threadTid(item), item.title ?? '').catch(() => {});
     } catch (e) {
-      message.error(`点赞失败：${(e as ApiError).message}`);
+      toastErr('点赞失败', e);
     } finally {
       setLiking(false);
     }
@@ -185,7 +186,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
         message.success('已收藏（在我的主页「收藏」tab 查看）');
       }
     } catch (e) {
-      message.error(`收藏操作失败：${(e as ApiError).message}`);
+      toastErr('收藏操作失败', e);
     } finally {
       setFaving(false);
     }
@@ -200,7 +201,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       setFollowed(true);
       message.success(resp.code === 100 ? `已关注 ${item.user_name ?? '楼主'}` : '该用户之前已关注');
     } catch (e) {
-      message.error(`关注失败：${(e as ApiError).message}`);
+      toastErr('关注失败', e);
     } finally {
       setFollowing(false);
     }
@@ -216,7 +217,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       setRewardRecords(list);
       message.success(list.length ? `打赏记录 ${list.length} 条` : '该帖暂无打赏');
     } catch (e) {
-      message.error(`打赏查询失败：${(e as ApiError).message}`);
+      toastErr('打赏查询失败', e);
     } finally {
       setRrLoading(false);
     }
@@ -232,7 +233,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
 
   return (
     <Card
-      title={`帖子详情 · tid=${item ? threadTid(item) : ''}`}
+      title={`帖子详情 · tid=${threadTid(item)}`}
       size="small"
       extra={
         <Space>

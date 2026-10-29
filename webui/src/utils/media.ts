@@ -14,7 +14,7 @@ const ENTITY_MAP: Record<string, string> = {
   '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&nbsp;': ' ',
 };
 
-export function decodeEntities(s: string): string {
+function decodeEntities(s: string): string {
   return s.replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (m) => ENTITY_MAP[m]);
 }
 

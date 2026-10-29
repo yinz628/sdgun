@@ -7,6 +7,7 @@ import {
   NOTIFY_LABEL, fmtEpochSec, loadWatchReadTids, migrateWatchReadFromHitIds, saveWatchReadTids,
   tidFromNotifyLink,
 } from '../utils/notify';
+import { toastErr } from '../utils/toast';
 import type { ConversationSummary, JsApiUser, NotifyIndexItem, NotifyItem, WatchHit, WatchRule, WatchStatus } from '../types/sdgun-api-types';
 
 /** 提醒时间窗选项(与后端 WINDOW_HOURS_CHOICES 一致) */
@@ -134,7 +135,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
         message.error(`登录未成功：${j.upstream?.msg ?? JSON.stringify(j).slice(0, 120)}`);
       }
     } catch (e) {
-      message.error(`请求失败：${(e as Error).message}`);
+      toastErr('请求失败', e);
     } finally {
       setReplaying(false);
     }
@@ -188,7 +189,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
     setConvLoading(true);
     sdgunApi.localConversations(user.user_id)
       .then((r) => setConvs(r.conversations ?? []))
-      .catch((e) => message.error(`会话列表加载失败：${(e as Error).message}`))
+      .catch((e) => toastErr('会话列表加载失败', e))
       .finally(() => setConvLoading(false));
   };
 
@@ -224,7 +225,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
         );
         setNotifyItems(results);
       } catch (e) {
-        message.error(`通知加载失败：${(e as Error).message}`);
+        toastErr('通知加载失败', e);
       } finally {
         setNotifyLoading(false);
       }
@@ -255,7 +256,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       setWatchReadTids(loadWatchReadTids());
       setWatchStatus(status);
     } catch (e) {
-      message.error(`关注数据加载失败：${(e as Error).message}`);
+      toastErr('关注数据加载失败', e);
     } finally {
       setWatchLoading(false);
     }
@@ -284,7 +285,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       setWatchStatus(await sdgunApi.watchStatus());
       message.success(`已改为只提醒 ${hours} 小时内发布的新帖`);
     } catch (e) {
-      message.error(`设置失败：${(e as Error).message}`);
+      toastErr('设置失败', e);
     }
   };
 
@@ -298,7 +299,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       setNewRuleName('');
       message.success('已添加关注规则');
     } catch (e) {
-      message.error(`添加失败：${(e as Error).message}`);
+      toastErr('添加失败', e);
     }
   };
 
@@ -308,7 +309,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       const r = await sdgunApi.watchRulesToggle(id);
       setWatchRules(r.rules ?? []);
     } catch (e) {
-      message.error(`切换失败：${(e as Error).message}`);
+      toastErr('切换失败', e);
     } finally {
       setWatchBusyId(null);
     }
@@ -320,7 +321,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       const r = await sdgunApi.watchRulesRemove(id);
       setWatchRules(r.rules ?? []);
     } catch (e) {
-      message.error(`删除失败：${(e as Error).message}`);
+      toastErr('删除失败', e);
     } finally {
       setWatchBusyId(null);
     }
@@ -335,7 +336,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
       else message.warning(`检测未完成：${r.error ?? '未知原因'}`);
       await loadWatch();
     } catch (e) {
-      message.error(`检测失败：${(e as Error).message}`);
+      toastErr('检测失败', e);
     } finally {
       setWatchRunning(false);
     }

@@ -8,6 +8,8 @@ import { sdgunApi } from '../api/sdgun';
 import { proxiedImage } from '../utils/media';
 import { parseChatMessage } from '../utils/chat';
 import { fmtEpochSec } from '../utils/notify';
+import { activityToFeed } from '../utils/adapters';
+import { toastErr } from '../utils/toast';
 import type {
   ChatMsgItem, FavoriteRecord, InfoFeedItem, LikeRecord, LoadUserItem, MyFollowItem, UserActivityItem, UserDetailResponse, UserHomeResponse,
 } from '../types/sdgun-api-types';
@@ -28,38 +30,6 @@ interface Props {
   onOpenUser?: (userId: number | string, name?: string) => void;
   /** 点击该用户的帖子 → 右侧切换为帖子详情 */
   onOpenThread: (item: InfoFeedItem) => void;
-}
-
-/** 用户动态/帖子条目 → 信息流条目（复用 ThreadPanel 的结构） */
-function activityToFeed(a: UserActivityItem): InfoFeedItem {
-  return {
-    id: Number(a.tid),
-    title: a.title ?? '(无标题)',
-    pic_type: (a.pics_arr?.length ?? 0) > 0 ? 1 : 0,
-    pics_arr: a.pics_arr ?? [],
-    from: `${a.user?.name ?? ''}　${a.click}`,
-    source: a.user?.name ?? '',
-    click: a.click,
-    publish_time_str: a.create_time_str,
-    label: '',
-    label_id: null,
-    link: a.link ?? `/mag/circle/v1/forum/threadViewPage?tid=${a.tid}`,
-    type: 2,
-    type_value: a.tid,
-    user_id: a.user?.id ?? '',
-    user_name: a.user?.name,
-    forum_name: a.forum_name,
-    des: '',
-    tags: [],
-    video_url: null,
-    is_vote: -1,
-    goods_info: '',
-    is_voice: -1,
-    is_live: null,
-    pics_count: a.pics_arr?.length ?? 0,
-    cover_type: 1,
-    applaud_count: String(a.applaud_count ?? 0),
-  } as unknown as InfoFeedItem;
 }
 
 /** 右侧：用户主页（头部资料 + 动态/论坛帖子列表 + 私信聊天） */
@@ -137,11 +107,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
     [me, mergeMsgs],
   );
 
-  // 从会话列表/新消息提醒进入时自动展开私信面板(openChat 是普通函数,经 ref 调用避免依赖抖动)
   const openChatRef = useRef<() => Promise<void>>();
-  useEffect(() => {
-    if (autoOpenChat) void openChatRef.current?.();
-  }, [autoOpenChat, userId]);
 
   /** 打开聊天:本地归档历史 → 换 chatToken → 补拉一次未读。
    *  后续新消息由 App 层的全局监听器(15s 轮询)经 sdgun-incoming-msgs 事件推送,
@@ -163,20 +129,26 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
       setChatToken(token);
       if (token) await pollUnread(token);
     } catch (e) {
-      message.error(`聊天凭证获取失败：${(e as ApiError).message}`);
+      toastErr('聊天凭证获取失败', e);
     } finally {
       setChatLoading(false);
     }
-  }; openChatRef.current = openChat;
+  };
 
+  // openChat 每次渲染都会重建,用 ref 保存最新引用(供挂载时的自动展开调用,避免依赖抖动);
+  // 本 effect 声明在自动展开 effect 之前,保证首次挂载时 ref 已就绪
+  useEffect(() => {
+    openChatRef.current = openChat;
+  });
+
+  // 从会话列表/新消息提醒进入时自动展开私信面板
+  useEffect(() => {
+    if (autoOpenChat) void openChatRef.current?.();
+  }, [autoOpenChat, userId]);
 
   const closeChat = () => {
     setChatOpen(false);
   };
-
-  useEffect(() => () => {
-    seenIds.current.clear();
-  }, []);
 
   // 订阅全局监听器的新消息事件(chatOpen 关闭时忽略,消息已在代理侧归档)
   useEffect(() => {
@@ -241,7 +213,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
         const h = await sdgunApi.userHome(userId);
         setHome(h);
       } catch (e) {
-        message.error(`用户主页加载失败：${(e as ApiError).message}`);
+        toastErr('用户主页加载失败', e);
       } finally {
         setHomeLoading(false);
       }
@@ -252,6 +224,10 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
         /* 昵称缺失不阻塞 */
       }
     })();
+    // 卸载时清空去重集合;与上面的「切换用户重置」合并到同一 effect,避免两段清理逻辑漂移
+    return () => {
+      seenIds.current.clear();
+    };
   }, [userId]);
 
   // 2) 列表 tab：动态 / 论坛（点击条目 → 帖子详情）
@@ -268,7 +244,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
         setAllItems(resp.list ?? []);
       } catch (e) {
         setAllItems([]);
-        message.error(`用户内容加载失败：${(e as ApiError).message}`);
+        toastErr('用户内容加载失败', e);
       } finally {
         setListLoading(false);
       }
@@ -288,7 +264,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
         setFollowsDone((resp.list ?? []).length < 20);
       } catch (e) {
         setFollows([]);
-        message.error(`关注列表加载失败：${(e as ApiError).message}`);
+        toastErr('关注列表加载失败', e);
       } finally {
         setFollowsLoading(false);
       }
@@ -308,7 +284,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
     setLikesLoading(true);
     sdgunApi.likesList()
       .then((r) => { setLikes(r.likes ?? []); setLikesLoaded(true); })
-      .catch((e) => message.error(`点赞历史加载失败：${(e as ApiError).message}`))
+      .catch((e) => toastErr('点赞历史加载失败', e))
       .finally(() => setLikesLoading(false));
   }, [isMe, tab, likesLoaded]);
 
@@ -317,7 +293,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
     setFavsLoading(true);
     sdgunApi.favoritesList()
       .then((r) => { setFavs(r.favorites ?? []); setFavsLoaded(true); })
-      .catch((e) => message.error(`收藏加载失败：${(e as ApiError).message}`))
+      .catch((e) => toastErr('收藏加载失败', e))
       .finally(() => setFavsLoading(false));
   }, [isMe, tab, favsLoaded]);
 
@@ -327,7 +303,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
         sdgunApi
           .userDetail(userId)
           .then(setDetail)
-          .catch((e) => message.error(`资料加载失败：${(e as ApiError).message}`));
+          .catch((e) => toastErr('资料加载失败', e));
       }
       return;
     }
@@ -343,7 +319,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread,
       setFollowed(true);
       message.success(resp.code === 100 ? `已关注 ${displayName}` : '该用户之前已关注');
     } catch (e) {
-      message.error(`关注失败：${(e as ApiError).message}`);
+      toastErr('关注失败', e);
     } finally {
       setFollowing(false);
     }
