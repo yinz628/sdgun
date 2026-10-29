@@ -12,71 +12,43 @@
 POST /likes/add {tid, title}——标题由前端带上,代理不解析帖子内容。
 """
 
-import json
 import logging
 import os
-import threading
-import time
 from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from sdgun_session import atomic_write_json
+from sdgun_store import BaseJsonStore
 
 logger = logging.getLogger("sdgun.likes")
 
 MAX_LIKES = 2000
 
 
-class LikeStore:
-    """线程安全的点赞归档(按 tid 去重,liked_at 倒序,原子落盘)。"""
+class LikeStore(BaseJsonStore):
+    """线程安全的点赞归档(按 tid 去重,liked_at 倒序,原子落盘)。
 
-    def __init__(self, data_dir: str):
-        self.path = os.path.join(data_dir, "sdgun_likes.json")
-        # RLock(可重入):add 持锁调 _persist → list() 再进锁;普通 Lock 会死锁
-        self._lock = threading.RLock()
-        self._likes: dict[int, dict] = {}   # tid -> {"tid", "title", "liked_at"}
-        self._load()
+    公共样板(路径/RLock/坏文件 fail-open 载入/原子落盘/上限裁剪)见 sdgun_store。
+    """
 
-    def _load(self) -> None:
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                likes = json.load(f).get("likes") or []
-            self._likes = {l["tid"]: l for l in likes if isinstance(l.get("tid"), int)}
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            if os.path.exists(self.path):
-                logger.warning("点赞归档读取失败(%s),从空库开始: %s", self.path, exc)
+    FILENAME = "sdgun_likes.json"
+    PAYLOAD_KEY = "likes"
+    TIME_FIELD = "liked_at"
+    LOG_LABEL = "点赞归档"
+    logger = logger
 
-    def _persist(self) -> None:
-        try:
-            atomic_write_json(self.path, {"likes": self.list()})
-        except OSError as exc:
-            logger.warning("点赞归档落盘失败(%s): %s", self.path, exc)
+    def _max_items(self) -> int:
+        return MAX_LIKES
 
-    def add(self, tid: int, title: str) -> bool:
-        """归档/刷新一条点赞(幂等,重复点赞更新时间),返回是否新增加。"""
-        added = False
-        with self._lock:
-            if tid not in self._likes:
-                added = True
-            self._likes[tid] = {"tid": tid, "title": title or "(无标题)",
-                                "liked_at": int(time.time())}
-            while len(self._likes) > MAX_LIKES:
-                oldest = min(self._likes, key=lambda k: self._likes[k]["liked_at"])
-                self._likes.pop(oldest)
-            self._persist()
-        return added
+    @property
+    def _likes(self) -> dict:
+        """兼容既有属性名(内部/测试按 _likes 访问,实际存于基类 _items)。"""
+        return self._items
 
     def list(self, limit: int = 200) -> list[dict]:
         """按点赞时间倒序返回(默认最近 200 条)。"""
-        with self._lock:
-            items = sorted(self._likes.values(), key=lambda l: l["liked_at"], reverse=True)
-        return items[:max(1, limit)]
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._likes)
+        return super().list(limit)
 
 
 store = LikeStore(os.environ.get("SDGUN_DATA_DIR") or

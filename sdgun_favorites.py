@@ -10,61 +10,34 @@
 以 tid 去重;上限 MAX_FAVORITES 条,最旧先出。
 """
 
-import json
 import logging
 import os
-import threading
-import time
 from typing import Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from sdgun_session import atomic_write_json
+from sdgun_store import BaseJsonStore
 
 logger = logging.getLogger("sdgun.favorites")
 
 MAX_FAVORITES = 1000
 
 
-class FavoriteStore:
-    """线程安全的收藏存储(tid 去重,可增删,added_at 倒序,原子落盘)。"""
+class FavoriteStore(BaseJsonStore):
+    """线程安全的收藏存储(tid 去重,可增删,added_at 倒序,原子落盘)。
 
-    def __init__(self, data_dir: str):
-        self.path = os.path.join(data_dir, "sdgun_favorites.json")
-        # RLock(可重入):add/remove 持锁调 _persist → list() 再进锁
-        self._lock = threading.RLock()
-        self._items: dict[int, dict] = {}   # tid -> {"tid","title","added_at"}
-        self._load()
+    公共样板(路径/RLock/坏文件 fail-open 载入/原子落盘/上限裁剪)见 sdgun_store。
+    """
 
-    def _load(self) -> None:
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                items = json.load(f).get("favorites") or []
-            self._items = {i["tid"]: i for i in items if isinstance(i.get("tid"), int)}
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            if os.path.exists(self.path):
-                logger.warning("收藏读取失败(%s),从空库开始: %s", self.path, exc)
+    FILENAME = "sdgun_favorites.json"
+    PAYLOAD_KEY = "favorites"
+    TIME_FIELD = "added_at"
+    LOG_LABEL = "收藏"
+    logger = logger
 
-    def _persist(self) -> None:
-        try:
-            atomic_write_json(self.path, {"favorites": self.list()})
-        except OSError as exc:
-            logger.warning("收藏落盘失败(%s): %s", self.path, exc)
-
-    def add(self, tid: int, title: str) -> bool:
-        """收藏(幂等,重复收藏刷新时间与标题),返回是否新增加。"""
-        added = False
-        with self._lock:
-            if tid not in self._items:
-                added = True
-            self._items[tid] = {"tid": tid, "title": title or "(无标题)",
-                                "added_at": int(time.time())}
-            while len(self._items) > MAX_FAVORITES:
-                oldest = min(self._items, key=lambda k: self._items[k]["added_at"])
-                self._items.pop(oldest)
-            self._persist()
-        return added
+    def _max_items(self) -> int:
+        return MAX_FAVORITES
 
     def remove(self, tid: int) -> bool:
         """取消收藏,返回是否确实删除了。"""
@@ -75,13 +48,7 @@ class FavoriteStore:
         return removed
 
     def list(self, limit: int = 500) -> list[dict]:
-        with self._lock:
-            items = sorted(self._items.values(), key=lambda i: i["added_at"], reverse=True)
-        return items[:max(1, limit)]
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._items)
+        return super().list(limit)
 
 
 store = FavoriteStore(os.environ.get("SDGUN_DATA_DIR") or
