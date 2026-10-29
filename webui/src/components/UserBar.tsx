@@ -4,9 +4,10 @@ import { sdgunApi } from '../api/sdgun';
 import { ApiError, PROXY_BASE } from '../api/client';
 import { proxiedImage } from '../utils/media';
 import {
-  NOTIFY_LABEL, fmtEpochSec, loadWatchReadTids, migrateWatchReadFromHitIds, saveWatchReadTids,
+  NOTIFY_LABEL, fmtEpochSec, loadWatchReadTids, migrateWatchReadFromHitIds,
   tidFromNotifyLink,
 } from '../utils/notify';
+import { reportWatchRead } from '../utils/uistate';
 import { toastErr } from '../utils/toast';
 import { tokenHeader } from '../utils/token';
 import type { ConversationSummary, JsApiUser, NotifyIndexItem, NotifyItem, WatchHit, WatchRule, WatchStatus } from '../types/sdgun-api-types';
@@ -273,11 +274,10 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
     void loadWatch();
   };
 
-  /** 记一批**帖子**(tid)为已读;写 localStorage 后同步 state,并让 App 重算角标 */
+  /** 记一批**帖子**(tid)为已读;写内存+localStorage 并上报服务端,同步 state,并让 App 重算角标 */
   const markTidsRead = (tids: number[]) => {
     if (tids.length === 0) return;
-    const next = Array.from(new Set([...loadWatchReadTids(), ...tids]));
-    saveWatchReadTids(next);
+    const next = reportWatchRead(tids);
     setWatchReadTids(next);
     onWatchRefresh?.();
   };

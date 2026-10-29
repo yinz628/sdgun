@@ -37,6 +37,7 @@ import type {
   WatchRulesResponse,
   WatchSettingsResponse,
   WatchStatus,
+  UiStateResponse,
 } from '../types/sdgun-api-types';
 
 /** 与抓包/代理对齐的接口封装（fid=0 已实测等价于真实 fid） */
@@ -116,6 +117,15 @@ export const sdgunApi = {
     getJson<{ has: boolean }>('/favorites/has', { tid }),
   favoritesList: (limit = 500) =>
     getJson<FavoritesListResponse>('/favorites/list', { limit }),
+
+  /* ===== 已读状态服务器化(sdgun_uistate.py;localStorage 降级为写穿缓存) ===== */
+
+  /** 拉取服务端已读集合(挂载早期并集迁移用) */
+  uistateGet: () => getJson<UiStateResponse>('/uistate'),
+
+  /** 上报已读并集(两个集合均可选;缺省表示本次该集合无变化),返回合并后的完整状态 */
+  uistateSeen: (body: { notify_ids?: string[]; watch_tids?: number[] }) =>
+    api.post('/uistate/seen', body).then((r) => r.data as UiStateResponse),
 
   /* ===== 关注关键字监控（本地代理，代理侧守护线程轮询信息流） ===== */
 

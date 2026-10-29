@@ -716,6 +716,12 @@ export interface LikesListResponse {
   total: number;
 }
 
+/** 已读状态服务器化(sdgun_uistate.py):通知已读令牌 + 关注命中已读 tid 两个集合 */
+export interface UiStateResponse {
+  notify_seen: string[]; // 不透明令牌 "code:create_time"(服务端不解析,仅并集+裁剪)
+  watch_read_tids: number[]; // 已读帖子 tid,数值降序
+}
+
 /** 关注关键字监控(sdgun_watch.py):代理侧守护线程轮询信息流,标题命中规则即记录 */
 export interface WatchRule {
   id: number;

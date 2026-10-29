@@ -9,6 +9,7 @@ import { sdgunApi } from './api/sdgun';
 import {
   NOTIFY_LABEL, fmtEpochSec, isWatchTidRead, migrateWatchReadFromHitIds, tidFromNotifyLink,
 } from './utils/notify';
+import { initUistate, loadNotifySeen, reportNotifySeen } from './utils/uistate';
 import { chatMsgExcerpt } from './utils/chat';
 import { setToken, TOKEN_REQUIRED_EVENT, tokenEvents } from './utils/token';
 import type { InfoFeedItem, JsApiUser } from './types/sdgun-api-types';
@@ -128,9 +129,10 @@ function useIncomingMsgWatcher(me: JsApiUser | null,
 
 /**
  * 通知中心监听:登录后每 60s 轮询 userNotifyIndex(各分类未读计数,实测轮询不清零)。
- * 已读状态存 localStorage(sdgunNotifySeen: code → 最后看到的 create_time):
- * 首次运行只建立基线不弹提醒;之后出现更新的 create_time 即弹提醒并累计角标,
- * 用户打开「通知」面板(markRead)后清零。上游无清除接口,计数由本地管理。
+ * 已读状态由 utils/uistate 管理(code → 最后看到的 create_time):内存集合 + localStorage
+ * 写穿缓存,并同步服务端 /uistate(挂载时 initUistate 做一次并集迁移)。首次运行只建立
+ * 基线不弹提醒;之后出现更新的 create_time 即弹提醒并累计角标,用户打开「通知」面板
+ * (markRead)后清零。上游无清除接口,计数由本地+服务端共同管理。
  */
 function useNotifyWatcher(me: JsApiUser | null) {
   const [unseen, setUnseen] = useState(0);
@@ -140,13 +142,10 @@ function useNotifyWatcher(me: JsApiUser | null) {
   useEffect(() => {
     if (!me) { setUnseen(0); return; }
     let stopped = false;
-    const KEY = 'sdgunNotifySeen';
 
-    const loadSeen = (): Record<string, number> => {
-      try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { return {}; }
-    };
-    const saveSeen = (s: Record<string, number>) =>
-      localStorage.setItem(KEY, JSON.stringify(s));
+    const loadSeen = (): Record<string, number> => loadNotifySeen();
+    // 每次写入即上报服务端(低频:轮询 60s/次、标记已读时;不做防抖)
+    const saveSeen = (s: Record<string, number>) => reportNotifySeen(s);
 
     const poll = async (silent: boolean) => {
       if (stopped) return;
@@ -304,6 +303,11 @@ export default function App() {
     tokenEvents.addEventListener(TOKEN_REQUIRED_EVENT, onTokenRequired);
     return () => tokenEvents.removeEventListener(TOKEN_REQUIRED_EVENT, onTokenRequired);
   }, []);
+
+  /** 已读状态服务器化:挂载早期与服务端取并集并回传一次(旧本地数据一次性迁移),
+   *  之后各处的标记已读即时上报。失败静默回落纯 localStorage,不影响页面。 */
+  useEffect(() => { void initUistate(); }, []);
+
 
   const submitToken = () => {
     const v = tokenDraft.trim();

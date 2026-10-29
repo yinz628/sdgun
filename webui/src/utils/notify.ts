@@ -40,19 +40,38 @@ const WATCH_READ_TID_KEY = 'sdgunWatchReadTids';
 const WATCH_READ_HIT_KEY = 'sdgunWatchReadIds';   // 旧 key:仅用于一次性迁移
 const WATCH_READ_MAX = 2000;
 
-export function loadWatchReadTids(): number[] {
+/* 内存集合 + localStorage 写穿缓存:
+ * 已读状态已服务器化(utils/uistate.ts 走 /uistate 同步),localStorage 降级为写穿缓存
+ * (服务端不可用时页面照常工作)。读取走内存集合;localStorage 被外部改动(raw 与上次
+ * 读取不一致)时重新解析,保证内存与缓存始终一致。 */
+let memTids: number[] = [];
+let memRaw: string | null = null;
+
+function parseTids(raw: string | null): number[] {
   try {
-    const raw = JSON.parse(localStorage.getItem(WATCH_READ_TID_KEY) || '[]');
-    return Array.isArray(raw) ? raw.filter((n) => typeof n === 'number' && n > 0) : [];
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr.filter((n) => typeof n === 'number' && n > 0) : [];
   } catch {
     return [];
   }
 }
 
+export function loadWatchReadTids(): number[] {
+  const raw = localStorage.getItem(WATCH_READ_TID_KEY);
+  if (raw !== memRaw) {          // 外部改动(或首次):以 localStorage 为准刷新内存
+    memTids = parseTids(raw);
+    memRaw = raw;
+  }
+  return memTids.slice();
+}
+
 export function saveWatchReadTids(tids: number[]): void {
   const uniq = Array.from(new Set(tids.filter((n) => Number.isFinite(n) && n > 0)));
   uniq.sort((a, b) => b - a); // 新→旧(tid 单调递增),截断后留下的正是最新的 2000 个
-  localStorage.setItem(WATCH_READ_TID_KEY, JSON.stringify(uniq.slice(0, WATCH_READ_MAX)));
+  const kept = uniq.slice(0, WATCH_READ_MAX);
+  memTids = kept;
+  memRaw = JSON.stringify(kept);
+  localStorage.setItem(WATCH_READ_TID_KEY, memRaw);
 }
 
 export function isWatchTidRead(tid: number): boolean {
