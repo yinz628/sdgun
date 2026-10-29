@@ -50,6 +50,7 @@ import sdgun_favorites
 import sdgun_likes
 import sdgun_messages
 import sdgun_sign
+import sdgun_uistate
 import sdgun_watch
 from sdgun_session import (
     APP_HEADERS,
@@ -162,6 +163,7 @@ app.include_router(sdgun_sign.router)
 app.include_router(sdgun_messages.router)
 app.include_router(sdgun_likes.router)
 app.include_router(sdgun_favorites.router)
+app.include_router(sdgun_uistate.router)
 app.include_router(sdgun_watch.router)
 
 # ============================ 访问控制(可选,默认关闭) ============================
