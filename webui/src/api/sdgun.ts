@@ -25,6 +25,7 @@ import type {
   ThreadListResponse,
   ThreadRowData,
   ThreadSearchResponse,
+  ThreadViewEnvelope,
   ToolsDefaultGetFourResponse,
   UserActivityResponse,
   UserDetailResponse,
@@ -157,7 +158,21 @@ export const sdgunApi = {
     api.post('/watch/settings', { window_hours: windowHours })
       .then((r) => r.data as WatchSettingsResponse),
 
-  /** 帖子正文页 HTML（正文在内嵌 var row = {...}.content，用 extractThreadRow 提取） */
+  /**
+   * 帖子正文页：服务端解析信封（阶段5 双路过渡）。
+   * 带 sdgun_parsed=1 → 代理剥参转发、服务端提取 var row 并代理化图片，返回
+   * {parsed_row, html}；parsed_row 为 null 时前端回落 extractThreadRow(html)。
+   * 请求整体失败（旧代理不支持该参数等）由调用方回落 fetchThreadHtml。
+   */
+  fetchThreadView: (tid: number | string) =>
+    getJson<ThreadViewEnvelope>('/mag/circle/v1/forum/threadViewPage', {
+      tid,
+      mag_hide_progress: 1,
+      themecolor: '111111',
+      sdgun_parsed: 1,
+    }),
+
+  /** 帖子正文页原始 HTML（信封不可用时的回落；正文在内嵌 var row.content） */
   fetchThreadHtml: (tid: number | string) =>
     api
       .get<string>('/mag/circle/v1/forum/threadViewPage', {

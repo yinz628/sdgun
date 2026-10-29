@@ -1,6 +1,6 @@
 import { PROXY_BASE } from '../api/client';
 import { sanitizeHtml } from './sanitize';
-import type { InfoFeedItem, ThreadRowData } from '../types/sdgun-api-types';
+import type { InfoFeedItem, ThreadRowData, ThreadViewEnvelope } from '../types/sdgun-api-types';
 
 /**
  * 图片与富文本工具：
@@ -102,7 +102,8 @@ export function threadTid(item: InfoFeedItem): number {
 /**
  * 从 threadViewPage HTML 提取内嵌的 var row = {...}（含正文 content）。
  * 用花括号配对 + 字符串状态扫描定位 JSON 边界，避免正则贪婪问题。
- * （与 sdgun_sign.py 的 _extract_var_row 为双实现,上游改格式需两处同步）
+ * （后端已单源化到 sdgun_parse.extract_var_row；本函数为过渡回落，
+ *   仅在信封 parsed_row 为 null 时使用，观察期后随信封改造的独立任务移除）
  */
 export function extractThreadRow(html: string): ThreadRowData | null {
   const anchor = html.indexOf('var row =');
@@ -132,6 +133,14 @@ export function extractThreadRow(html: string): ThreadRowData | null {
     }
   }
   return null;
+}
+
+/**
+ * 阶段5 双路过渡：优先消费服务端解析信封的 parsed_row（已由后端代理化图片 URL），
+ * parsed_row 为 null 时回落前端 extractThreadRow(html)。纯逻辑、不触网，便于单测。
+ */
+export function resolveThreadRow(env: ThreadViewEnvelope): ThreadRowData | null {
+  return env.parsed_row ?? extractThreadRow(env.html ?? '');
 }
 
 /**

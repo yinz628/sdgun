@@ -472,6 +472,18 @@ export interface ThreadRowData {
   [key: string]: unknown;
 }
 
+/**
+ * threadViewPage 的服务端解析信封（阶段5 双路过渡）。
+ * 请求带 `sdgun_parsed=1` 时，代理剥参转发、照常改写 HTML 图片，再服务端提取
+ * var row 并把其中的纯字段图片 URL 代理化，以本信封返回：
+ *   parsed_row  服务端解析并代理化后的 var row；提取失败为 null（前端回落自提取）
+ *   html        改写后的原始 HTML（parsed_row 为 null 或需站方错误页识别时用）
+ */
+export interface ThreadViewEnvelope {
+  parsed_row: ThreadRowData | null;
+  html: string;
+}
+
 /** GET /mag/circle/v1/Forum/threadList?fid=&p=&step= 版块帖子列表（真实分页） */
 export interface ThreadListItem {
   tid: string;
