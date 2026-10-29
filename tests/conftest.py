@@ -29,3 +29,12 @@ def _clean_data_dir():
     for f in glob.glob(os.path.join(_TMP_DATA, "*.json")):
         os.remove(f)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_access_control_env(monkeypatch):
+    """访问门禁/CORS 配置在中间件里逐请求读取:开发机若已导出这两个变量,
+    期望"无门禁/CORS 全开"的历史用例会无故失败。这里统一清空,需要开启的
+    用例自行 monkeypatch.setenv。"""
+    monkeypatch.delenv("SDGUN_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("SDGUN_CORS_ORIGINS", raising=False)

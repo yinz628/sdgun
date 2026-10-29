@@ -124,6 +124,49 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
 `/health` 会话健康探针（60s 缓存，`?force=1` 强制刷新，
 供 Docker HEALTHCHECK 与排障用）。
 
+## 访问控制
+
+默认与原行为完全一致：**不设访问令牌、CORS 全开**，只适合本机/可信局域网。
+代理携带论坛登录态，一旦要暴露到公网，请同时启用下面两项（都从代理进程的
+环境变量读取，未设置即关闭/维持现状）。
+
+### 访问令牌门禁 `SDGUN_ACCESS_TOKEN`
+
+- 未设置或为空：门禁关闭（现状，无需任何前端改动）。
+- 已设置：除 `/`、`/index.html`、`/assets/**`、`/favicon.ico`、`/health`、
+  `/proxy-info` 外，所有请求必须携带令牌，否则返回
+  `401 {"success": false, "code": 401, "msg": "未授权:需要访问令牌"}`。
+  豁免项只做精确/前缀匹配，`/link`、`/proxy`、`/mag/**` 等动态路由一律需要令牌。
+- 两种携带方式任选：`Authorization: Bearer <token>` 或 `X-Sdgun-Token: <token>`
+  （`hmac.compare_digest` 比较，大小写敏感）。
+- 前端（webui）在收到该 401 时会弹窗要求输入令牌，存入 localStorage（`sdgunToken`）
+  后整页重载；**这是代理访问令牌，不是论坛账号密码/登录态**。
+- 令牌与论坛登录无关：它只保护代理入口，不能替代论坛 Cookie。
+
+### CORS 白名单 `SDGUN_CORS_ORIGINS`
+
+- 未设置：维持 `Access-Control-Allow-Origin: *`（本地开发不变）。
+- 已设置：逗号分隔的 origin 列表，如
+  `https://a.example,http://127.0.0.1:5173`；仅当请求 `Origin` 命中时精确回显该
+  origin，未命中/无 Origin 时**不回任何 CORS 头**。
+- 单程序模式（页面由代理同源托管）本就不需要 CORS；通常是 vite 开发
+  （`:5173`）或独立前端站点才需要配置。
+
+### VPS 部署示例
+
+本机设置环境变量后运行部署脚本，`deploy/deploy_common.py` 的 `DOCKER_RUN`
+会自动把这两项以 `-e` 注入容器（未设置时不追加任何参数，命令与原来完全一致）：
+
+```bash
+SDGUN_ACCESS_TOKEN='足够随机的长令牌' \
+SDGUN_CORS_ORIGINS='https://your-domain.example' \
+SDGUN_DEPLOY_PASSWORD='...' \
+python deploy/update_dist.py
+```
+
+> 注意：该令牌会出现在部署命令字符串与 `docker inspect` 的容器环境变量里，
+> 请用足够随机的值，并限制部署终端的访问。
+
 ## 开发与维护
 
 - **版本控制**：git 仓库（`sdgun*.json` 抓包/会话数据已在 `.gitignore` 排除，不会入库）。
@@ -264,7 +307,8 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
   剥除 script/事件属性/javascript: 链接等；用户头衔与搜索标题同样过闸）。
 - 付费帖正文服务端只下发部分内容。
 - 代理默认携带抓包兜底会话（等于你的账号登录态），**不要暴露到公网**；
-  `Access-Control-Allow-Origin: *` 为本地开发配置，正式部署需收紧。
+  公网部署前必须启用访问令牌门禁并收紧 CORS（用法见「访问控制」小节，
+  未配置时与本地开发行为完全一致）。
 - 真实写操作（点击即生效、他人可见）：点赞、关注、**评论**、私信、每日任务、签到；
   评论支持删除（响应里的 delete_url）。
 

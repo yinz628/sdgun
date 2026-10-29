@@ -9,6 +9,8 @@
   capture_files          抓包文件发现(排除状态文件)
   /proxy 白名单          通用代理的目标守卫
   /health                会话健康探针(空会话时降级,不发网络)
+  访问令牌门禁           SDGUN_ACCESS_TOKEN(豁免边界、两种头形态、401)
+  CORS 白名单            SDGUN_CORS_ORIGINS(命中回显/未命中无头/未设维持 *)
 """
 
 import json
@@ -383,3 +385,149 @@ class TestLinkBridge:
     def test_rejects_non_http_scheme(self, client):
         r = client.get("/link", params={"url": "ftp://example.com/x"})
         assert r.status_code == 400
+
+
+# ============================ 访问令牌门禁 ============================
+
+TOKEN = "s3cr3t-token"
+UNAUTHORIZED_BODY = {"success": False, "code": 401, "msg": "未授权:需要访问令牌"}
+
+
+class TestAccessTokenGuard:
+    """SDGUN_ACCESS_TOKEN 门禁:未配置时行为不变,配置后除豁免外全需令牌。
+
+    环境变量在中间件里**逐请求**读取(而非 import 时求值),因此 monkeypatch 在
+    import 之后设置即可生效——这正是这组用例存在的意义,也固定了实现细节。
+    """
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def test_disabled_when_env_unset(self, client, monkeypatch):
+        monkeypatch.delenv("SDGUN_ACCESS_TOKEN", raising=False)
+        assert client.get("/sign/status").status_code == 200
+
+    def test_disabled_when_env_blank(self, client, monkeypatch):
+        # 空/纯空白等同于未设置,门禁保持关闭
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", "   ")
+        assert client.get("/sign/status").status_code == 200
+
+    @pytest.mark.parametrize("path,params", [
+        ("/mag/index/v1/Index/jsApi", None),
+        ("/proxy", {"url": "http://picapp.sdgun.net/x.jpg"}),
+        ("/link", {"url": "http://e.tb.cn/abc"}),
+        ("/sign/status", None),
+    ])
+    def test_enabled_requires_token(self, client, monkeypatch, path, params):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        r = client.get(path, params=params)
+        assert r.status_code == 401
+        assert r.json() == UNAUTHORIZED_BODY
+
+    @pytest.mark.parametrize("path", ["/health", "/proxy-info"])
+    def test_exempt_endpoints_pass(self, client, monkeypatch, path):
+        # 健康探针/排障入口不泄业务数据,是 Docker HEALTHCHECK 的依赖
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        assert client.get(path).status_code == 200
+
+    def test_static_paths_exempt(self, client, monkeypatch):
+        # SPA 必须先能加载页面与静态资源,否则令牌输入框无从弹起
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        assert client.get("/").status_code == 200
+        import re
+        m = re.search(r'src="(/assets/[^"]+\.js)"', client.get("/").text)
+        assert m, "构建产物 index.html 里没有 /assets/*.js 引用"
+        assert client.get(m.group(1)).status_code == 200
+        # favicon 未必打进 dist,但绝不能是门禁 401
+        assert client.get("/favicon.ico").status_code != 401
+
+    def test_prefix_exemption_does_not_leak_to_dynamic_routes(self, client, monkeypatch):
+        # 豁免只做精确/前缀匹配:/assets 前缀不得外溢到 /link、/proxy,
+        # 形如 /assetsx 也不属于 /assets/ 前缀
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        assert client.get("/link").status_code == 401
+        assert client.get("/proxy").status_code == 401
+        assert client.get("/assetsx").status_code == 401
+
+    def test_bearer_header_passes(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        r = client.get("/sign/status", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert r.status_code == 200
+
+    def test_x_sdgun_token_header_passes(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        r = client.get("/sign/status", headers={"X-Sdgun-Token": TOKEN})
+        assert r.status_code == 200
+
+    def test_wrong_or_malformed_token_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        for headers in ({"Authorization": "Bearer wrong"},
+                        {"X-Sdgun-Token": "wrong"},
+                        {"Authorization": TOKEN}):   # 缺 "Bearer " 前缀不算命中
+            assert client.get("/sign/status", headers=headers).status_code == 401
+
+    def test_token_comparison_is_case_sensitive(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", "AbC")
+        assert client.get("/sign/status", headers={"X-Sdgun-Token": "abc"}).status_code == 401
+        assert client.get("/sign/status", headers={"X-Sdgun-Token": "AbC"}).status_code == 200
+
+    def test_401_still_carries_cors_header(self, client, monkeypatch):
+        # 门禁中间件注册在 CORS 之内:401 也必须经过 CORS 中间件,否则跨域开发
+        # 模式下浏览器读不到响应体,前端弹不出令牌输入框
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        r = client.get("/sign/status")
+        assert r.status_code == 401
+        assert r.headers["access-control-allow-origin"] == "*"
+
+    def test_preflight_not_blocked_by_guard(self, client, monkeypatch):
+        # 预检 OPTIONS 不带自定义头,由外层 CORS 中间件短路,不应被门禁拦下
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", TOKEN)
+        assert client.options("/mag/index/v1/Index/jsApi").status_code == 204
+
+
+# ============================ CORS 白名单 ============================
+
+class TestCorsOrigins:
+    """SDGUN_CORS_ORIGINS:未设置维持 *,设置后只对命中 Origin 精确回显。"""
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def test_unset_keeps_wildcard(self, client, monkeypatch):
+        monkeypatch.delenv("SDGUN_CORS_ORIGINS", raising=False)
+        r = client.get("/proxy-info", headers={"Origin": "https://any.example"})
+        assert r.headers["access-control-allow-origin"] == "*"
+
+    def test_allowed_origin_echoed_exactly(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_CORS_ORIGINS",
+                           "https://a.example, http://127.0.0.1:5173")
+        r = client.get("/proxy-info", headers={"Origin": "http://127.0.0.1:5173"})
+        assert r.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+        assert "origin" in r.headers["vary"].lower()   # 回显型 ACAO 必须 Vary: Origin
+
+    def test_disallowed_origin_gets_no_cors_headers(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_CORS_ORIGINS", "https://a.example")
+        r = client.get("/proxy-info", headers={"Origin": "https://evil.example"})
+        assert "access-control-allow-origin" not in r.headers
+        assert "access-control-allow-methods" not in r.headers
+
+    def test_missing_origin_with_whitelist_gets_no_cors_headers(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_CORS_ORIGINS", "https://a.example")
+        r = client.get("/proxy-info")
+        assert "access-control-allow-origin" not in r.headers
+
+    def test_preflight_echoes_allowed_origin(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_CORS_ORIGINS", "https://a.example")
+        r = client.options("/mag/index/v1/Index/jsApi", headers={"Origin": "https://a.example"})
+        assert r.status_code == 204
+        assert r.headers["access-control-allow-origin"] == "https://a.example"
+
+    def test_preflight_disallowed_origin_has_no_cors_headers(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_CORS_ORIGINS", "https://a.example")
+        r = client.options("/mag/index/v1/Index/jsApi", headers={"Origin": "https://evil.example"})
+        assert r.status_code == 204
+        assert "access-control-allow-origin" not in r.headers

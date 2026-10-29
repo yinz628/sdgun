@@ -3,11 +3,16 @@
 SDGun API 轻量级 CORS 代理(FastAPI + requests)
 
 解决三个浏览器端问题:
-  1. CORS 跨域:所有响应加 Access-Control-Allow-Origin: *
+  1. CORS 跨域:默认所有响应加 Access-Control-Allow-Origin: *(本地开发;
+     设置 SDGUN_CORS_ORIGINS 后收紧为白名单精确回显)
   2. 混合内容:聊天服务/部分图片是 http 明文,HTTPS 页面无法直接访问,由代理转发
   3. 请求指纹:上游 WAF 会校验请求头顺序等指纹(httpx 的默认头序会被判定
      "登录信息已过期",requests 的头序可用)——因此转发层必须用 requests,
      且依赖版本已锁定(deploy/requirements.txt),升级前必须跑 tests/
+
+访问控制(可选,未配置时行为与历史版本完全一致):
+  SDGUN_ACCESS_TOKEN  访问令牌;设置后除健康探针/入口页/静态资源外全部要求令牌
+  SDGUN_CORS_ORIGINS  CORS 白名单(逗号分隔 origin);未设置时维持 *
 
 路由设计(挂在根路径,上游 302 的相对 Location 会自动落回代理,图片链路天然可用):
   ANY /mag/**   /core/**  /public/**  →  https://mag1.sdgun.net/**
@@ -29,7 +34,9 @@ App 头自动补充:User-Agent(MAGAPPX) / mag-version / X-Requested-With / Refer
   python -m uvicorn sdgun_proxy:app --host 127.0.0.1 --port 8000
 """
 
+import hmac
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -157,6 +164,71 @@ app.include_router(sdgun_likes.router)
 app.include_router(sdgun_favorites.router)
 app.include_router(sdgun_watch.router)
 
+# ============================ 访问控制(可选,默认关闭) ============================
+
+# 访问令牌门禁与 CORS 白名单都从环境变量读取,且在**每次请求时读取**而非 import
+# 时求值:
+#   1. 容器可用 `docker run -e` 在启动后注入,无需改代码/重建镜像;
+#   2. 测试可 monkeypatch 在 import 之后逐用例开关,互不污染。
+# 未配置时行为与历史版本完全一致(无门禁、CORS 全开)——向后兼容是硬约束。
+
+
+def _access_token() -> str:
+    """当前生效的访问令牌;空串表示门禁关闭。"""
+    return os.environ.get("SDGUN_ACCESS_TOKEN", "").strip()
+
+
+def _cors_origins() -> list:
+    """CORS 白名单(去掉末尾斜杠);空列表表示维持 * 全开。"""
+    return [o.strip().rstrip("/") for o in os.environ.get("SDGUN_CORS_ORIGINS", "").split(",") if o.strip()]
+
+
+# 门禁豁免:健康探针/排障入口不泄业务数据(Docker HEALTHCHECK 也依赖);
+# 入口页与静态资源必须先能加载,否则 SPA 自身起不来、令牌输入框也无从弹起。
+# 只做精确匹配与前缀匹配——/link、/proxy 等动态路由绝不能落进前缀豁免。
+_EXEMPT_EXACT = {"/", "/index.html", "/favicon.ico", "/health", "/proxy-info"}
+_EXEMPT_PREFIXES = ("/assets/",)
+
+
+def _is_exempt_path(path: str) -> bool:
+    return path in _EXEMPT_EXACT or any(path.startswith(p) for p in _EXEMPT_PREFIXES)
+
+
+def _provided_tokens(request: Request):
+    """按两种约定产出请求方提交的令牌原值(Bearer 与 X-Sdgun-Token 任一即可)。"""
+    auth = request.headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        yield auth[7:].strip()
+    x_token = request.headers.get("x-sdgun-token")
+    if x_token:
+        yield x_token.strip()
+
+
+@app.middleware("http")
+async def access_token_middleware(request: Request, call_next):
+    """可选的访问令牌门禁:SDGUN_ACCESS_TOKEN 为空时完全关闭(直接放行)。
+
+    必须注册在 CORS 中间件之前(Starlette 后注册者在外层):这样本中间件直接
+    返回的 401 仍会经过 cors_middleware 补 CORS 头——开发模式下浏览器才能读到
+    401 响应体,前端据此弹出令牌输入框;预检 OPTIONS 也在外层短路、无需令牌。
+    """
+    token = _access_token()
+    if not token or _is_exempt_path(request.url.path):
+        return await call_next(request)
+
+    expected = token.encode("utf-8")
+    # compare_digest 定长比较,避免按字节提前返回的时序侧信道;令牌大小写敏感、
+    # 按原值比较。
+    if any(hmac.compare_digest(expected, got.encode("utf-8"))
+           for got in _provided_tokens(request)):
+        return await call_next(request)
+
+    # 只记方法与路径,绝不打印令牌/请求头(日志会被部署脚本回显到终端)
+    logger.warning("[auth] 未授权请求: %s %s", request.method, request.url.path)
+    return JSONResponse({"success": False, "code": 401, "msg": "未授权:需要访问令牌"},
+                        status_code=401)
+
+
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, PATCH, OPTIONS",
@@ -166,13 +238,31 @@ CORS_HEADERS = {
 }
 
 
+def _cors_headers(origin: Optional[str]) -> dict:
+    """按运行期配置计算本次响应的 CORS 头。
+
+    未配置 SDGUN_CORS_ORIGINS → 维持 * 全开(本地开发不变);配置后仅当请求
+    Origin 命中白名单时精确回显该 origin,未命中/无 Origin 则一个 CORS 头都不回。
+    """
+    headers = dict(CORS_HEADERS)
+    allowed = _cors_origins()
+    if not allowed:
+        return headers
+    if origin and origin.rstrip("/") in allowed:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Vary"] = "Origin"   # 回显型 ACAO 必须声明随 Origin 变化,防缓存串味
+        return headers
+    return {}
+
+
 @app.middleware("http")
 async def cors_middleware(request: Request, call_next):
-    """所有响应加 CORS 头;OPTIONS 预检直接 204 短路。"""
+    """附加 CORS 头;OPTIONS 预检直接 204 短路(预检不带自定义头,无需令牌)。"""
+    cors = _cors_headers(request.headers.get("origin"))
     if request.method == "OPTIONS":
-        return Response(status_code=204, headers=CORS_HEADERS)
+        return Response(status_code=204, headers=cors)
     response = await call_next(request)
-    for k, v in CORS_HEADERS.items():
+    for k, v in cors.items():
         response.headers[k] = v
     return response
 
@@ -549,8 +639,6 @@ async def link_through(request: Request, url: Optional[str] = None):
 # 存在 webui/dist(npm run build 产物)时,由本服务直接托管页面,
 # 一个程序同时提供页面与代理(同源,无 CORS)。开发时仍可用 vite:5173 + .env.development。
 # 注意:根路径挂载会吞掉之后注册的路由,因此必须放在所有 @app 路由之后。
-
-import os  # noqa: E402
 
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 

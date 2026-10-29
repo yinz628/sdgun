@@ -17,6 +17,7 @@ deploy.py(全量)/update_dist.py(增量)/monitor.py(监控)共用。此前三个
 """
 import os
 import posixpath
+import shlex
 import sys
 
 import paramiko
@@ -26,6 +27,16 @@ USER = os.environ.get("SDGUN_DEPLOY_USER", "root")
 LOCAL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # F:\rchang\sdgun
 REMOTE_APP = "/opt/sdgun/app"
 REMOTE_DATA = "/opt/sdgun/data"
+
+# 访问令牌门禁 / CORS 白名单:本机设置了对应环境变量才以 -e 注入容器,未设置
+# 时不产生任何参数(命令行与历史版本完全一致)。注意 SSH 远端不继承本地环境,
+# `-e NAME` 的取值会落到远端 shell 里,因此必须显式下发 NAME=VALUE 并 shell 转义。
+_PASSTHROUGH_ENV = ("SDGUN_ACCESS_TOKEN", "SDGUN_CORS_ORIGINS")
+_ENV_ARGS = "".join(
+    f"-e {name}={shlex.quote(os.environ[name])} "
+    for name in _PASSTHROUGH_ENV
+    if os.environ.get(name)
+)
 
 # 容器运行参数(全部部署脚本共用一份;改这里即全部生效)
 DOCKER_RUN = (
@@ -39,6 +50,7 @@ DOCKER_RUN = (
     # 新帖(2026-10-22 实测 7/11 分钟前的新帖不在 cat3 p=1 的 50 条里,而版块
     # threadList 前 50 条就包含),用户关键字全是交易场景,故直接用版块源
     "-e SDGUN_WATCH_FID=176 "
+    f"{_ENV_ARGS}"
     "-p 50002:8000 "
     f"-v {REMOTE_DATA}:/data sdgun"
 )
