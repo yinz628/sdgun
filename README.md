@@ -122,6 +122,9 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
 （`/proxy?url=`，白名单限 sdgun 相关域名，跟随重定向）、
 **HTML 图片改写**（WAP 页/threadViewPage 里直连图床的 src/data-original
 统一改走 `/proxy`，兼容 lazyload 与 var row JSON 转义形态）、
+**threadViewPage 服务端解析信封**（前端带 `?sdgun_parsed=1` 时：代理剥掉该参数转发、
+照常改写 HTML，再服务端提取 var row 并代理化其中纯字段图片 URL，返回
+`{parsed_row, html}` JSON；不带参数的请求仍原样透传 HTML，不影响帖内站内链接的同源渲染）、
 外链跳桥（`/link?url=`，绕开 e.tb.cn 等证书不匹配域名，不携带会话 Cookie）、
 每日自动签到、**关注关键字监控**（`/watch/**`，守护线程轮询信息流，命中即落本地）、
 `/health` 会话健康探针（60s 缓存，`?force=1` 强制刷新，
@@ -175,7 +178,8 @@ python deploy/update_dist.py
 - **版本控制**：git 仓库（`sdgun*.json` 抓包/会话数据已在 `.gitignore` 排除，不会入库）。
   日常改动随手 commit，上游改版时可用历史 bisect 回溯。
 - **回归测试**：`python -m pytest tests/`（全部离线）。覆盖 HTML 图片改写、
-  var row 提取、抓包 Cookie 解析、会话存储并发、/proxy 白名单守卫、
+  var row 提取与 threadViewPage 服务端解析信封、抓包 Cookie 解析、会话存储并发、
+  /proxy 白名单守卫、
   /proxy 媒体流式（含 chunked 无 content-length 回归）、/link 跳桥重定向分流、
   关注关键字匹配与基线/裁剪语义等最易碎的解析与转发逻辑。**升级 requests/urllib3/fastapi 前必须先跑测试**——
   上游 WAF 校验请求头指纹、IPv4 强制依赖 urllib3 私有 API，依赖版本已在
@@ -183,9 +187,15 @@ python deploy/update_dist.py
 - **类型定义**：唯一源为 `webui/src/types/sdgun-api-types.ts`（原根目录副本
   `sdgun-api-types.ts` 与构建期一致性校验脚本 `scripts/check-types-sync.mjs`
   已于 2026-10-29 移除，前端直接引用该文件）。
-- **双实现同步**：`var row` 提取（Python `sdgun_sign._extract_var_row` ↔ TS
-  `media.ts extractThreadRow`）与 HTML 图片改写（`sdgun_proxy._rewrite_html_images`
-  ↔ `media.ts prepareCommentHtml`）是同一算法两份实现，上游改格式时两处必须同步。
+- **解析单源化与前端回落（阶段5 双路过渡）**：
+  - `var row` 提取**已单源化**到后端 `sdgun_parse.extract_var_row`（`sdgun_sign` 与
+    `sdgun_proxy` 的 threadViewPage 信封共用同一实现）；前端 `media.ts extractThreadRow`
+    仅作**过渡回落**——`?sdgun_parsed=1` 信封不可用或 `parsed_row=null` 时使用，
+    待观察期后由独立任务移除。
+  - HTML 图片改写：**页面侧已服务端化**（`sdgun_proxy._rewrite_html_images` 改写 WAP 页/
+    threadViewPage，信封内再以 `proxify_images` 代理化 var row 的纯字段图片 URL）；
+    评论富文本侧仍由前端 `media.ts prepareCommentHtml` 承担（与 DOMPurify 消毒同管线），
+    **有意保留**，不随本次单源化移除。
 
 ## 登录机制
 
