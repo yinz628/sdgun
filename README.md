@@ -19,7 +19,7 @@
 | `sdgun_api_test.py` | 接口连通性测试脚本（8 个用例，依赖真实会话，属诊断工具） |
 | `tests/` | 离线回归测试（pytest，不依赖网络；改动解析逻辑/升级依赖前必跑） |
 | `webui/` | React 18 + Ant Design 5 前端（Vite + TS strict） |
-| `sdgun-2026-08-2*.json` | 抓包文件（Anything Analyzer 导出；代理会自动发现并提取会话与登录记录） |
+| `captures/sdgun-*.json` | 抓包文件（Anything Analyzer 导出；代理自动发现并提取会话与登录记录。旧平铺布局即放仓库/数据卷根目录仍兼容） |
 | `sdgun_session.json` | 代理自维护的会话（自动生成，含上游 Set-Cookie 吸收） |
 | `sdgun_sign.json` | 自动签到状态（最近签到日期/结果；删掉无害，幂等） |
 | `sdgun_watch.json` | 关注关键字规则与命中记录（本地监控，删掉会重建基线，不回溯历史帖） |
@@ -72,7 +72,8 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
 > ⚠️ **日常更新（改了后端 .py 或前端）一律用 `update_dist.py`**。`deploy.py` 会把本地所有
 > `sdgun*.json`（含 `sdgun_session.json`）盖到服务器数据卷——本机的会话文件可能早已过期，
 > 全量上传会把 VPS 上仍有效的会话覆盖成失效会话，整站变"登录信息已过期"。
-> 只想给 VPS 换会话/补抓包时：把新 JSON 放到 `/opt/sdgun/data/` 后 `docker restart sdgun`。
+> 只想给 VPS 换会话/补抓包时：把新 JSON 放到 `/opt/sdgun/data/captures/` 后 `docker restart sdgun`
+> （抓包约定放数据卷的 `captures/` 子目录；旧平铺布局即直接放 `/opt/sdgun/data/` 仍兼容）。
 >
 > 三个脚本共用 `deploy_common.py`（SSH 连接、上传、`docker run` 参数的单一事实来源）；
 > 容器参数（DNS、端口、挂载卷）只需改 `deploy_common.DOCKER_RUN` 一处。
@@ -110,7 +111,9 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
    根治：`docker run --dns 223.5.5.5 --dns 119.29.29.29`（两个部署脚本均已加，
    公共 DNS 走直连路由可达，与宿主解析解耦）。
 
-更新会话/抓包：把新 JSON 放到 `/opt/sdgun/data/` 后 `docker restart sdgun`。
+更新会话/抓包：把新 JSON 放到 `/opt/sdgun/data/captures/` 后 `docker restart sdgun`
+（抓包约定放数据卷的 `captures/` 子目录，代理优先扫描该目录；旧平铺布局即直接放
+`/opt/sdgun/data/` 仍兼容）。
 更新代码：改本地文件后重跑 `deploy/deploy.py`；只改前端则跑 `deploy/update_dist.py`。
 签到状态文件 `sdgun_sign.json` 也在 data 卷（删掉会重签检查一次，幂等无害）。
 

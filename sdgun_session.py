@@ -256,14 +256,20 @@ class SessionStore:
 # ============================ 抓包文件解析 ============================
 
 def capture_files(data_dir: str) -> list[str]:
-    """发现目录下的抓包文件(sdgun*.json),按修改时间从新到旧返回完整路径。
+    """发现抓包文件(sdgun*.json),按修改时间从新到旧返回完整路径。
 
-    排除代理自维护的状态文件(sdgun_session.json / sdgun_sign.json),
+    约定布局:抓包放 data_dir/captures/ 子目录;该目录有抓包时以它为准。
+    仅当 captures/ 下没有抓包时才回落扫描 data_dir 根目录——VPS 早期平铺布局
+    (抓包直接堆在数据卷根)仍兼容,迁移到 captures/ 后根目录的旧文件自然被忽略。
+    两种布局都排除代理自维护的状态文件(sdgun_session.json / sdgun_sign.json),
     它们不是抓包记录列表,误读会让启动自检崩溃。
     """
     excluded = {"sdgun_session.json", "sdgun_sign.json"}
-    paths = [p for p in glob.glob(os.path.join(data_dir, "sdgun*.json"))
+    paths = [p for p in glob.glob(os.path.join(data_dir, "captures", "sdgun*.json"))
              if os.path.basename(p) not in excluded]
+    if not paths:   # 无 captures/ 布局(旧平铺布局):回落数据卷根目录
+        paths = [p for p in glob.glob(os.path.join(data_dir, "sdgun*.json"))
+                 if os.path.basename(p) not in excluded]
     paths.sort(key=os.path.getmtime, reverse=True)
     return paths
 

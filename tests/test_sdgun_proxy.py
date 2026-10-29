@@ -159,6 +159,29 @@ class TestCaptureExtraction:
         assert "sdgun_session.json" not in files
         assert "sdgun_sign.json" not in files
 
+    def test_capture_files_prefers_captures_subdir(self, tmp_path):
+        # 约定布局:captures/ 有抓包时以它为准,根目录旧平铺文件被忽略
+        cap = tmp_path / "captures"
+        cap.mkdir()
+        (cap / "sdgun-x.json").write_text("[]", encoding="utf-8")
+        (tmp_path / "sdgun-y.json").write_text("[]", encoding="utf-8")
+        files = [os.path.basename(p) for p in capture_files(str(tmp_path))]
+        assert files == ["sdgun-x.json"]
+
+    def test_capture_files_falls_back_to_flat_layout(self, tmp_path):
+        # 无 captures/(VPS 旧平铺布局):仍能从数据卷根目录发现抓包,向后兼容
+        (tmp_path / "sdgun-y.json").write_text("[]", encoding="utf-8")
+        files = [os.path.basename(p) for p in capture_files(str(tmp_path))]
+        assert files == ["sdgun-y.json"]
+
+    def test_capture_files_captures_subdir_excludes_state_files(self, tmp_path):
+        cap = tmp_path / "captures"
+        cap.mkdir()
+        for name in ("sdgun-a.json", "sdgun_session.json", "sdgun_sign.json"):
+            (cap / name).write_text("{}", encoding="utf-8")
+        files = [os.path.basename(p) for p in capture_files(str(tmp_path))]
+        assert files == ["sdgun-a.json"]
+
 
 # ============================ 路由守卫(/proxy、/health、/sign、CORS) ============================
 

@@ -2,6 +2,8 @@
 """SDGun Docker 全量部署:本机 → VPS(连接凭据经环境变量,见 deploy_common)。
 
 ⚠️ 全量 = 会把本地所有 sdgun*.json(含 sdgun_session.json)上传到数据卷。
+抓包类(sdgun-*.json)上传到数据卷的 captures/ 子目录(与 sdgun_session.capture_files
+的约定布局一致);会话/签到等运行时状态文件仍放数据卷根目录。
 本机会话文件可能早已过期,会把 VPS 上仍有效的会话盖掉,整站变"登录信息
 已过期"。日常更新一律用 update_dist.py;本脚本仅首次部署或确认要整体
 重置(含换会话数据)时使用。
@@ -18,10 +20,29 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import deploy_common as dc
 
 
-def _data_files() -> list[str]:
-    """本机待上传覆盖 VPS 数据卷的 sdgun*.json(排序保证清单稳定)。"""
-    return sorted(f for f in os.listdir(dc.LOCAL_ROOT)
-                  if f.startswith("sdgun") and f.endswith(".json"))
+def _data_files() -> list[tuple[str, str]]:
+    """本机待上传的数据文件 → (本地路径, 远端目标路径),清单稳定。
+
+    抓包类(sdgun-*.json,约定放本地 captures/)上传到数据卷 captures/ 子目录;
+    会话/签到等运行时状态文件(sdgun_session.json / sdgun_sign.json)仍放数据卷根目录。
+    根目录与 captures/ 两处都扫描:未迁移的旧布局(抓包堆在仓库根)也能被带上。
+    """
+    out: list[tuple[str, str]] = []
+
+    def add(local_dir: str, name: str) -> None:
+        # sdgun-*.json(带短横线)视为抓包,其余(sdgun_session.json 等下划线命名)为运行时状态
+        remote_dir = f"{dc.REMOTE_DATA}/captures" if name.startswith("sdgun-") else dc.REMOTE_DATA
+        out.append((os.path.join(local_dir, name), f"{remote_dir}/{name}"))
+
+    for name in sorted(os.listdir(dc.LOCAL_ROOT)):
+        if name.startswith("sdgun") and name.endswith(".json"):
+            add(dc.LOCAL_ROOT, name)
+    captures_dir = os.path.join(dc.LOCAL_ROOT, "captures")
+    if os.path.isdir(captures_dir):
+        for name in sorted(os.listdir(captures_dir)):
+            if name.startswith("sdgun") and name.endswith(".json"):
+                add(captures_dir, name)
+    return out
 
 
 def _confirm_data_overwrite(files: list[str]) -> None:
@@ -69,10 +90,10 @@ def main():
     print(f"    前端构建产物 {n} 个文件")
     data_files = _data_files()
     if data_files and not assume_yes:
-        _confirm_data_overwrite(data_files)
-    for f in data_files:
-        dc.upload(ssh, os.path.join(dc.LOCAL_ROOT, f), f"{dc.REMOTE_DATA}/{f}")
-        print(f"    数据文件 {f}")
+        _confirm_data_overwrite([os.path.basename(local) for local, _ in data_files])
+    for local, remote in data_files:
+        dc.upload(ssh, local, remote)
+        print(f"    数据文件 {os.path.basename(local)} → {remote}")
 
     # ---- 4/5. 构建并换容器 ----
     print("[4] 构建镜像")
