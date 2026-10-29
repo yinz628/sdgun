@@ -1,4 +1,4 @@
-import { api, getJson, postForm } from './client';
+import { api, getJson, postForm, type SdgunRequestConfig } from './client';
 import type {
   ChannelConfigResponse,
   ChatMsgItem,
@@ -40,6 +40,28 @@ import type {
   WatchStatus,
   UiStateResponse,
 } from '../types/sdgun-api-types';
+
+/** 账号密码登录响应(代理 /auth/login):成功含安全字段 user;失败 msg 可带上游锁定计数 */
+export interface AuthLoginResult {
+  success: boolean;
+  msg?: string;
+  user?: {
+    user_id?: number | string;
+    name?: string;
+    head?: string;
+    group_name?: string;
+    group_id?: number | string;
+  };
+  session_updated?: boolean;
+  http_status?: number;
+}
+
+/** 重放抓包登录响应(代理 /auth/replay-exact) */
+export interface AuthReplayResult {
+  http_status: number;
+  upstream: { success?: boolean; msg?: string; data?: { token?: string } } | null;
+  session_updated: boolean;
+}
 
 /** 与抓包/代理对齐的接口封装（fid=0 已实测等价于真实 fid） */
 export const sdgunApi = {
@@ -369,4 +391,34 @@ export const sdgunApi = {
     // 上游偶发 >20s 慢响应(见函数头注释),单独放宽超时,减少"超时但实际已发出"的误报
     return postForm<SendChatMsgResponse>('/msg/sendMsg', form, { timeout: 45000 });
   },
+
+  /* ===== 认证(代理本地端点;并入 axios 层以复用 token 注入与统一错误路径) ===== */
+
+  /**
+   * 账号密码登录(代理 /auth/login,WAP 明文通道)。
+   * __raw + validateStatus 全通过:登录失败(含上游 3 次锁定的 msg)是业务结果,
+   * 需原样回传弹窗逐字展示,不能被响应拦截器当异常抛掉。连接层失败(请求未到
+   * 服务器,服务端不可能有副作用、不会计入上游锁定)等 1s 重试一次——与历史
+   * 裸 fetch 行为一致。
+   */
+  authLogin: async (account: string, password: string): Promise<AuthLoginResult> => {
+    const cfg: SdgunRequestConfig = { __raw: true, validateStatus: () => true };
+    const post = () => api.post<AuthLoginResult>('/auth/login', { account, password }, cfg);
+    try {
+      return (await post()).data;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+      return (await post()).data;
+    }
+  },
+
+  /**
+   * 一键登录:让代理重放最新抓包里的登录报文(含 mag-ss-key),成功即获得新会话。
+   * 与 authLogin 同用 __raw:404(无抓包)/502(重放失败)也带 JSON 体,原样回传。
+   */
+  authReplayExact: () =>
+    api
+      .post<AuthReplayResult>('/auth/replay-exact', undefined,
+        { __raw: true, validateStatus: () => true } as SdgunRequestConfig)
+      .then((r) => r.data),
 };

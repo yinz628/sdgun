@@ -24,10 +24,13 @@ export class ApiError extends Error {
  * 请求级自定义开关（axios 原样透传 config，响应拦截器读取）：
  *  __noRetry  关闭 GET 幂等内建重试（见 getJson / 响应拦截器）
  *  __retried  拦截器内部标记：已重试过一次，防无限重试
+ *  __raw      跳过响应拦截器的 {success,code,msg} 解包与抛错，调用方自行判 success
+ *             （登录端点用：失败 msg 带上游锁定计数，是业务结果而非异常）
  */
 export type SdgunRequestConfig = AxiosRequestConfig & {
   __noRetry?: boolean;
   __retried?: boolean;
+  __raw?: boolean;
 };
 
 /**
@@ -53,6 +56,8 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
 api.interceptors.response.use(
   (resp: AxiosResponse) => {
+    // __raw:调用方要原始响应体(登录失败 msg 含锁定计数,需逐字展示,不能当异常抛)
+    if ((resp.config as SdgunRequestConfig).__raw) return resp;
     const ct = String(resp.headers['content-type'] ?? '');
     if (!ct.includes('json')) return resp; // HTML 等非 JSON 原样返回
     const payload = resp.data;

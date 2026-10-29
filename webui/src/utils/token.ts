@@ -2,8 +2,8 @@
  * 代理访问令牌(与论坛登录态无关)。
  *
  * 部署时设置 SDGUN_ACCESS_TOKEN 后,代理要求业务请求携带令牌;前端把令牌存
- * localStorage,由 api/client 的拦截器统一注入,UserBar 里两处裸 fetch 用
- * tokenHeader() 补齐。这是"能访问代理"的凭证,不是论坛账号密码/Cookie。
+ * localStorage,由 api/client 的拦截器统一注入(全部请求走 axios 层,不再有
+ * 裸 fetch 手工拼头)。这是"能访问代理"的凭证,不是论坛账号密码/Cookie。
  */
 
 const TOKEN_KEY = 'sdgunToken';
@@ -29,12 +29,6 @@ export function clearToken(): void {
   try {
     localStorage.removeItem(TOKEN_KEY);
   } catch { /* 同 setToken */ }
-}
-
-/** 有令牌时的请求头;axios 拦截器与裸 fetch 共用同一份逻辑 */
-export function tokenHeader(): Record<string, string> {
-  const token = getToken();
-  return token ? { 'X-Sdgun-Token': token } : {};
 }
 
 /**

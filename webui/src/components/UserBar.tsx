@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Avatar, Badge, Button, Drawer, Form, Input, List, Modal, Popconfirm, Popover, Segmented, Select, Space, Spin, Switch, Tag, Typography, message } from 'antd';
 import { sdgunApi } from '../api/sdgun';
-import { ApiError, PROXY_BASE } from '../api/client';
+import { ApiError } from '../api/client';
 import { proxiedImage } from '../utils/media';
 import {
   NOTIFY_LABEL, fmtEpochSec, loadWatchReadTids, migrateWatchReadFromHitIds,
@@ -9,7 +9,6 @@ import {
 } from '../utils/notify';
 import { reportWatchRead } from '../utils/uistate';
 import { toastErr } from '../utils/toast';
-import { tokenHeader } from '../utils/token';
 import type { ConversationSummary, JsApiUser, NotifyIndexItem, NotifyItem, WatchHit, WatchRule, WatchStatus } from '../types/sdgun-api-types';
 
 /** 提醒时间窗选项(与后端 WINDOW_HOURS_CHOICES 一致) */
@@ -126,11 +125,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
   const replayLogin = async () => {
     setReplaying(true);
     try {
-      const resp = await fetch(`${PROXY_BASE}/auth/replay-exact`, {
-        method: 'POST',
-        headers: tokenHeader(),   // 代理启用访问令牌门禁时必需
-      });
-      const j = await resp.json();
+      const j = await sdgunApi.authReplayExact();
       if (j.session_updated) {
         message.success('登录成功，已获取新会话');
         setLoginOpen(false);
@@ -150,23 +145,9 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
   const accountLogin = async (values: { account: string; password: string }) => {
     setLoggingIn(true);
     setLoginFailMsg(null);
-    const post = () =>
-      fetch(`${PROXY_BASE}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...tokenHeader() },
-        body: JSON.stringify(values),
-      });
     try {
-      let resp: Response;
-      try {
-        resp = await post();
-      } catch {
-        // 连接层失败(请求未到达服务器,如局域网/docker-proxy 瞬时抖动):
-        // 服务端不可能有副作用(不会计入上游失败锁定),等 1s 重试一次
-        await new Promise((r) => setTimeout(r, 1000));
-        resp = await post();
-      }
-      const j = await resp.json();
+      // 网络级重试一次(仅连接层失败)与失败文案(含上游锁定计数)均由 authLogin 负责
+      const j = await sdgunApi.authLogin(values.account, values.password);
       if (j.success) {
         message.success(`登录成功：${j.user?.name ?? ''}（uid ${j.user?.user_id ?? '?'}）`);
         loginForm.resetFields();
