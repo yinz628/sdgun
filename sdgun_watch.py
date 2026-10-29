@@ -72,10 +72,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from sdgun_session import (
-    APP_HEADERS,
     MAIN_ORIGIN,
-    UPSTREAM_TIMEOUT,
     atomic_write_json,
+    call_upstream,
     store as session_store,
     upstream_client,
 )
@@ -558,6 +557,17 @@ store = WatchStore(os.environ.get("SDGUN_DATA_DIR") or
 _poll_lock = threading.Lock()
 
 
+def _call_upstream(method: str, path: str, **kwargs):
+    """本模块的上游调用:绑定本模块的 upstream_client/session_store 注入缝。
+
+    样板(身份头 + Cookie + absorb)已收敛到 sdgun_session.call_upstream;这里只把
+    本模块的模块级引用显式传进去,保持既有测试对 sdgun_watch.upstream_client /
+    session_store 的 monkeypatch 仍然生效。
+    """
+    return call_upstream(method, path, client=upstream_client,
+                         session_store=session_store, **kwargs)
+
+
 def _resolve_source(st: WatchStore) -> Optional[dict]:
     """解析监控源:env 指定 > 本地缓存 > 首页框架自动解析(第一个 column_type==7 频道)。
 
@@ -589,12 +599,7 @@ def _resolve_source(st: WatchStore) -> Optional[dict]:
     if cached:
         return cached
     try:
-        r = upstream_client.get(
-            MAIN_ORIGIN + "/mag/index/v2/index/pages",
-            headers=dict(APP_HEADERS, Cookie=session_store.cookie_header()),
-            timeout=UPSTREAM_TIMEOUT,
-        )
-        session_store.absorb(r)
+        r = _call_upstream("GET", MAIN_ORIGIN + "/mag/index/v2/index/pages")
         fragment = json.loads(r.json().get("index_fragment") or "[]")
         channel = next((f for f in fragment if _to_positive_int(f.get("column_type")) == 7), None)
         if not channel:
@@ -604,13 +609,8 @@ def _resolve_source(st: WatchStore) -> Optional[dict]:
         if not channel_id:
             return None
 
-        r2 = upstream_client.get(
-            MAIN_ORIGIN + "/mag/info/v3/channel/channelConfigById",
-            params={"channel_id": channel_id},
-            headers=dict(APP_HEADERS, Cookie=session_store.cookie_header()),
-            timeout=UPSTREAM_TIMEOUT,
-        )
-        session_store.absorb(r2)
+        r2 = _call_upstream("GET", MAIN_ORIGIN + "/mag/info/v3/channel/channelConfigById",
+                            params={"channel_id": channel_id})
         data = r2.json().get("data") or {}
         info_config = [c for c in (data.get("info_config") or []) if isinstance(c, dict)]
         # 优先「新帖」类分类:线上实测频道 6 的第一个分类是「无余」(聚焦精选流,
@@ -670,26 +670,16 @@ def _fetch_feed(source: dict) -> tuple[list, Optional[set]]:
     """
     fid = _to_positive_int(source.get("fid"))
     if fid:
-        r = upstream_client.get(
-            MAIN_ORIGIN + "/mag/circle/v1/Forum/threadList",
-            params={"fid": fid, "p": 1, "step": 50},
-            headers=dict(APP_HEADERS, Cookie=session_store.cookie_header()),
-            timeout=UPSTREAM_TIMEOUT,
-        )
-        session_store.absorb(r)
+        r = _call_upstream("GET", MAIN_ORIGIN + "/mag/circle/v1/Forum/threadList",
+                           params={"fid": fid, "p": 1, "step": 50})
         payload = r.json()
         items = [_normalize_thread_item(t) for t in (payload.get("list") or [])
                  if isinstance(t, dict)]
         return items, None
 
-    r = upstream_client.get(
-        MAIN_ORIGIN + "/mag/info/v2/channel/infoListByCatId",
-        params={"channel_id": source["channel_id"], "cat_id": source["cat_id"],
-                "p": 1, "step": 50, "tab": 0, "is_app_first": -1},
-        headers=dict(APP_HEADERS, Cookie=session_store.cookie_header()),
-        timeout=UPSTREAM_TIMEOUT,
-    )
-    session_store.absorb(r)
+    r = _call_upstream("GET", MAIN_ORIGIN + "/mag/info/v2/channel/infoListByCatId",
+                       params={"channel_id": source["channel_id"], "cat_id": source["cat_id"],
+                               "p": 1, "step": 50, "tab": 0, "is_app_first": -1})
     payload = r.json()
     items = payload.get("list") or []
     raw_total = payload.get("totalList")

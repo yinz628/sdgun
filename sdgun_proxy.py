@@ -50,6 +50,7 @@ from sdgun_session import (
     CHAT_ORIGIN,
     MAIN_ORIGIN,
     DATA_DIR,
+    call_upstream,
     find_login_record,
     store,
     upstream_client,
@@ -379,13 +380,11 @@ async def auth_login(request: Request):
 
     def do():
         try:
-            resp = upstream_client.post(
-                MAIN_ORIGIN + "/mag/user/v1/User/login",
-                headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
-                data=form, timeout=UPSTREAM_TIMEOUT, allow_redirects=False)
+            resp = call_upstream(
+                "POST", MAIN_ORIGIN + "/mag/user/v1/User/login",
+                data=form, allow_redirects=False)
         except upstream_lib.RequestException as exc:
             return None, f"{type(exc).__name__}: {exc}"
-        store.absorb(resp)
         return resp, None
 
     resp, err = await run_in_threadpool(do)

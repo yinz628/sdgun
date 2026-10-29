@@ -6,6 +6,7 @@
   - 代理会话 Cookie 的存取/持久化/上游 Set-Cookie 吸收(线程安全)
   - 抓包文件发现与 Cookie/登录报文提取
   - 会话有效性校验(jsApi)与启动自检(并发探测)
+  - 统一上游 JSON 调用助手 call_upstream(身份头 + 会话 Cookie + absorb)
 
 设计要点:
   - Cookie 的唯一事实来源是 SessionStore._cookies;共享 requests.Session 的
@@ -327,3 +328,38 @@ def find_login_record(data_dir: str) -> Optional[dict]:
 
 # 模块级单例:数据目录由 SDGUN_DATA_DIR 决定(Docker 挂载 /data)
 store = SessionStore(DATA_DIR)
+
+
+# ============================ 统一上游调用 ============================
+
+def call_upstream(method: str, path: str, *, params=None, data=None,
+                  timeout=UPSTREAM_TIMEOUT, cookie=None, allow_redirects=None,
+                  client=None, session_store=None):
+    """统一上游 JSON 调用:APP_HEADERS + 会话 Cookie(或显式覆盖) + absorb。
+
+    签到 / 关注监控 / 登录等模块此前各自拼 `dict(APP_HEADERS, Cookie=...)` 再
+    get/post、最后 absorb——样板重复且容易漏掉 absorb(漏了就丢 Set-Cookie 轮换,
+    症状是"莫名登录信息已过期")。这里收敛成一处:注入 App 身份头、带会话 Cookie、
+    吸收上游 Set-Cookie。
+
+    返回 requests.Response(调用方继续自己解 JSON);异常不吞,由调用方原有的
+    try/except 处理路径照旧兜底。client/session_store 默认取本模块单例,调用方可
+    显式注入替身——关注监控等模块保留了自己的模块级引用作为测试注入缝。
+    """
+    client = client if client is not None else upstream_client
+    session_store = session_store if session_store is not None else store
+    headers = dict(APP_HEADERS,
+                   Cookie=session_store.cookie_header() if cookie is None else cookie)
+    kwargs = {"headers": headers, "timeout": timeout}
+    if allow_redirects is not None:
+        kwargs["allow_redirects"] = allow_redirects
+    method = method.upper()
+    # 按方法分派到 get/post(而非 client.request):上游替身在测试里只实现 get/post
+    if method == "GET":
+        resp = client.get(path, params=params, **kwargs)
+    elif method == "POST":
+        resp = client.post(path, data=data, **kwargs)
+    else:
+        resp = client.request(method, path, params=params, data=data, **kwargs)
+    session_store.absorb(resp)
+    return resp
