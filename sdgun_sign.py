@@ -11,8 +11,8 @@
       SDGUN_SIGN_TZ_OFFSET 改时区偏移。配置值非法一律回退默认并告警——
       守护线程不能死于配置笔误。
 
-双实现提示:_extract_var_row 与 webui/src/utils/media.ts 的 extractThreadRow
-是同一算法的两份实现(花括号配对 + 字符串状态扫描),上游改格式时两处必须同步。
+var row 提取算法已单源化到 sdgun_parse.extract_var_row(本模块与 sdgun_proxy 共用);
+webui/src/utils/media.ts 的 extractThreadRow 为过渡回落,观察期后移除。
 """
 
 import json
@@ -27,6 +27,7 @@ import requests as upstream_lib
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
+from sdgun_parse import extract_var_row as _extract_var_row
 from sdgun_session import MAIN_ORIGIN, call_upstream, store
 
 logger = logging.getLogger("sdgun.sign")
@@ -91,38 +92,6 @@ def _save_sign_state(state: dict) -> None:
     except OSError as exc:
         # 同 SessionStore.persist:签到状态落盘失败必须留痕,否则"重启补签"会静默失效
         logger.warning("签到状态落盘失败(%s): %s", SIGN_STATE_FILE, exc)
-
-
-def _extract_var_row(html: str) -> Optional[dict]:
-    """提取 WAP 页面内嵌的 var row = {...}(花括号配对 + 字符串状态扫描)。"""
-    anchor = html.find("var row =")
-    if anchor < 0:
-        return None
-    start = html.find("{", anchor)
-    if start < 0:
-        return None
-    depth, in_str, i = 0, None, start
-    while i < len(html):
-        ch = html[i]
-        if in_str:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == in_str:
-                in_str = None
-        elif ch in ('"', "'"):
-            in_str = ch
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(html[start:i + 1])
-                except ValueError:
-                    return None
-        i += 1
-    return None
 
 
 # ============================ 签到执行 ============================
