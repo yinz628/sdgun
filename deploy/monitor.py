@@ -13,14 +13,16 @@
   9. 错误日志扫描        docker logs 里的 error/warning/traceback
 
 用法:python deploy/monitor.py [--wait N]  # --wait: 额外等 N 秒后复查容器健康态
-凭据与 deploy.py 一致(本地自用工具,明文配置)。
+凭据经环境变量(SDGUN_DEPLOY_PASSWORD / SDGUN_DEPLOY_KEYFILE,见 deploy_common)。
 """
+import os
 import sys
 import time
 
-import paramiko
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-HOST, USER, PASSWORD = "192.168.2.197", "root", "nature123"
+import deploy_common as dc
+
 BASE = "http://127.0.0.1:50002"
 
 
@@ -29,9 +31,7 @@ def main():
     if "--wait" in sys.argv:
         wait_after = int(sys.argv[sys.argv.index("--wait") + 1])
 
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(HOST, username=USER, password=PASSWORD, timeout=12)
+    ssh = dc.connect()
 
     def run(cmd: str, timeout: int = 60) -> tuple[str, str]:
         _, out, err = ssh.exec_command(cmd, timeout=timeout)
@@ -49,7 +49,7 @@ def main():
         if not ok:
             failures.append(name)
 
-    print(f"===== SDGun VPS 监控检查 @ {HOST}:{50002} =====")
+    print(f"===== SDGun VPS 监控检查 @ {dc.HOST}:50002 =====")
 
     # 1. 容器状态
     status = run("docker ps --filter name=sdgun --format '{{.Status}}'")[0]

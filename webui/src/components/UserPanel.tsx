@@ -6,8 +6,10 @@ import {
 import { ApiError } from '../api/client';
 import { sdgunApi } from '../api/sdgun';
 import { proxiedImage } from '../utils/media';
+import { parseChatMessage } from '../utils/chat';
+import { fmtEpochSec } from '../utils/notify';
 import type {
-  ChatMsgItem, InfoFeedItem, LoadUserItem, UserActivityItem, UserDetailResponse, UserHomeResponse,
+  ChatMsgItem, FavoriteRecord, InfoFeedItem, LikeRecord, LoadUserItem, MyFollowItem, UserActivityItem, UserDetailResponse, UserHomeResponse,
 } from '../types/sdgun-api-types';
 
 const T_STEP = 20;
@@ -20,6 +22,10 @@ interface Props {
   me?: { user_id: number; name: string; head: string } | null;
   /** 关闭用户主页，返回帖子详情 */
   onClose: () => void;
+  /** 进入主页即展开私信面板（从会话列表/新消息提醒点进来时用） */
+  autoOpenChat?: boolean;
+  /** 点击其他用户（关注列表项等）→ 打开对方主页 */
+  onOpenUser?: (userId: number | string, name?: string) => void;
   /** 点击该用户的帖子 → 右侧切换为帖子详情 */
   onOpenThread: (item: InfoFeedItem) => void;
 }
@@ -57,16 +63,30 @@ function activityToFeed(a: UserActivityItem): InfoFeedItem {
 }
 
 /** 右侧：用户主页（头部资料 + 动态/论坛帖子列表 + 私信聊天） */
-export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread }: Props) {
+export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread, autoOpenChat = false, onOpenUser }: Props) {
   const [home, setHome] = useState<UserHomeResponse | null>(null);
   const [profile, setProfile] = useState<LoadUserItem | null>(null);
   const [detail, setDetail] = useState<UserDetailResponse | null>(null);
   const [homeLoading, setHomeLoading] = useState(true);
 
-  const [tab, setTab] = useState<'detail' | 'activity' | 'forum'>('activity');
-  const [activities, setActivities] = useState<UserActivityItem[]>([]);
+  const [tab, setTab] = useState<'detail' | 'activity' | 'forum' | 'follows' | 'likes' | 'favs'>('activity');
+  const [allItems, setAllItems] = useState<UserActivityItem[]>([]);   // 全量(≤100 条),本地分页切片展示
   const [listLoading, setListLoading] = useState(false);
   const [listPage, setListPage] = useState(1);
+  // 我的关注列表(仅自己的主页展示;关注后此前无处查看,见 2026-09-10 迭代)
+  const [follows, setFollows] = useState<MyFollowItem[]>([]);
+  const [followsPage, setFollowsPage] = useState(1);
+  const [followsDone, setFollowsDone] = useState(false);
+  const [followsLoading, setFollowsLoading] = useState(false);
+  // 我的点赞(网页端本地归档 sdgun_likes;上游无此接口,只能从功能上线起累积)
+  const [likes, setLikes] = useState<LikeRecord[]>([]);
+  const [likesLoading, setLikesLoading] = useState(false);
+  const [likesLoaded, setLikesLoaded] = useState(false);
+  // 我的收藏(网页端本地标记 sdgun_favorites;上游收藏接口未逆向)
+  const [favs, setFavs] = useState<FavoriteRecord[]>([]);
+  const [favsLoading, setFavsLoading] = useState(false);
+  const [favsLoaded, setFavsLoaded] = useState(false);
+  const isMe = me != null && Number(userId) === me.user_id;
 
   const [followed, setFollowed] = useState(false);
   const [following, setFollowing] = useState(false);
@@ -117,6 +137,12 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     [me, mergeMsgs],
   );
 
+  // 从会话列表/新消息提醒进入时自动展开私信面板(openChat 是普通函数,经 ref 调用避免依赖抖动)
+  const openChatRef = useRef<() => Promise<void>>();
+  useEffect(() => {
+    if (autoOpenChat) void openChatRef.current?.();
+  }, [autoOpenChat, userId]);
+
   /** 打开聊天:本地归档历史 → 换 chatToken → 补拉一次未读。
    *  后续新消息由 App 层的全局监听器(15s 轮询)经 sdgun-incoming-msgs 事件推送,
    *  本面板不再自建 interval(避免泄漏与双重消费)。 */
@@ -141,7 +167,8 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     } finally {
       setChatLoading(false);
     }
-  };
+  }; openChatRef.current = openChat;
+
 
   const closeChat = () => {
     setChatOpen(false);
@@ -185,16 +212,6 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     }
   };
 
-  /** 消息 content 是 JSON 字符串：{"text":"..."} */
-  const msgText = (m: ChatMsgItem): string => {
-    try {
-      const parsed = JSON.parse(m.content);
-      return parsed.text ?? m.content;
-    } catch {
-      return m.content;
-    }
-  };
-
   const displayName = profile?.name ?? nameHint ?? (home?.data?.sharedata?.title?.replace?.(/的.*$/, '') ?? `用户${userId}`);
 
   // 1) 主页框架 + 明文资料（userHome 的 name 是 RSA 密文，明文昵称取 loadUsers）
@@ -203,7 +220,7 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     setHome(null);
     setProfile(null);
     setDetail(null);
-    setActivities([]);
+    setAllItems([]);
     setListPage(1);
     setFollowed(false);
     // 组件按位置复用,切换用户必须重置聊天面板(残留消息/会话态会串到下一用户)
@@ -212,6 +229,13 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     setChatToken('');
     setChatMsgs([]);
     setChatText('');
+    setFollows([]);
+    setFollowsPage(1);
+    setFollowsDone(false);
+    setLikes([]);
+    setLikesLoaded(false);
+    setFavs([]);
+    setFavsLoaded(false);
     (async () => {
       try {
         const h = await sdgunApi.userHome(userId);
@@ -231,18 +255,19 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
   }, [userId]);
 
   // 2) 列表 tab：动态 / 论坛（点击条目 → 帖子详情）
-  const loadList = useCallback(
-    async (which: 'activity' | 'forum', p: number) => {
+  // 上游 userActivityPage/userForumOrShowPage 实测忽略 p 参数(各页返回相同内容,
+  // 2026-10-20 VPS 实测),但 step 如实生效——改为一次拉 step=100 全量 + 本地分页
+  const loadAllItems = useCallback(
+    async (which: 'activity' | 'forum') => {
       setListLoading(true);
       try {
         const resp =
           which === 'activity'
-            ? await sdgunApi.userActivity(userId, p, T_STEP)
-            : await sdgunApi.userForumOrShow(userId, 3, p, T_STEP);
-        setActivities(resp.list ?? []);
-        if (p > 1 && (resp.list ?? []).length === 0) message.info('没有更多内容了');
+            ? await sdgunApi.userActivity(userId, 1, 100)
+            : await sdgunApi.userForumOrShow(userId, 3, 1, 100);
+        setAllItems(resp.list ?? []);
       } catch (e) {
-        setActivities([]);
+        setAllItems([]);
         message.error(`用户内容加载失败：${(e as ApiError).message}`);
       } finally {
         setListLoading(false);
@@ -250,6 +275,51 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
     },
     [userId],
   );
+
+  /** 我的关注列表(仅自己主页;MyFollowsList 无 total,条数<step 即末页) */
+  const loadFollows = useCallback(
+    async (p: number) => {
+      if (!me) return;
+      setFollowsLoading(true);
+      try {
+        const resp = await sdgunApi.myFollowsList(me.user_id, p);
+        setFollows(resp.list ?? []);
+        setFollowsPage(p);
+        setFollowsDone((resp.list ?? []).length < 20);
+      } catch (e) {
+        setFollows([]);
+        message.error(`关注列表加载失败：${(e as ApiError).message}`);
+      } finally {
+        setFollowsLoading(false);
+      }
+    },
+    [me],
+  );
+
+  useEffect(() => {
+    if (isMe && tab === 'follows') void loadFollows(1);
+  }, [isMe, tab, loadFollows]);
+
+  // 点赞/收藏的加载:显式 loaded 标志做"只拉一次"守卫。空列表时不能用
+  // length>0 当守卫(永不命中→请求完成后 effect 重跑→无限循环+loading 闪屏);
+  // 失败不标 loaded——切走再切回 tab 即重试,但不会原地循环
+  useEffect(() => {
+    if (!isMe || tab !== 'likes' || likesLoaded) return;
+    setLikesLoading(true);
+    sdgunApi.likesList()
+      .then((r) => { setLikes(r.likes ?? []); setLikesLoaded(true); })
+      .catch((e) => message.error(`点赞历史加载失败：${(e as ApiError).message}`))
+      .finally(() => setLikesLoading(false));
+  }, [isMe, tab, likesLoaded]);
+
+  useEffect(() => {
+    if (!isMe || tab !== 'favs' || favsLoaded) return;
+    setFavsLoading(true);
+    sdgunApi.favoritesList()
+      .then((r) => { setFavs(r.favorites ?? []); setFavsLoaded(true); })
+      .catch((e) => message.error(`收藏加载失败：${(e as ApiError).message}`))
+      .finally(() => setFavsLoading(false));
+  }, [isMe, tab, favsLoaded]);
 
   useEffect(() => {
     if (tab === 'detail') {
@@ -261,9 +331,10 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
       }
       return;
     }
-    void loadList(tab, listPage);
+    if (tab === 'follows' || tab === 'likes' || tab === 'favs') return;   // 由专属 effect 加载
+    void loadAllItems(tab);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, listPage, userId]);
+  }, [tab, userId]);
 
   const doFollow = async () => {
     setFollowing(true);
@@ -283,12 +354,15 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
   const tagSection = detail?.data?.find?.((s) => s.type === 'tagList');
   const tagRows = Array.isArray(tagSection?.data) ? (tagSection!.data as Array<{ id: number; name: string }>) : [];
 
-  const renderList = (label: string) => (
+  const renderList = (label: string) => {
+    // 本地分页切片(上游忽略 p,已一次拉全量 ≤100 条存 allItems)
+    const pageItems = allItems.slice((listPage - 1) * T_STEP, listPage * T_STEP);
+    return (
     <Spin spinning={listLoading}>
-      {activities.length === 0 && !listLoading ? (
+      {allItems.length === 0 && !listLoading ? (
         <Empty description={`暂无${label}`} image={Empty.PRESENTED_IMAGE_SIMPLE} />
       ) : (
-        activities.map((a) => (
+        pageItems.map((a) => (
           <List.Item
             key={`${a.tid}-${a.create_time ?? ''}`}
             style={{ cursor: 'pointer', padding: '10px 6px', borderRadius: 6 }}
@@ -323,16 +397,18 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
           </List.Item>
         ))
       )}
+      {/* 本地全量分页:total 精确(上限 100 条/上游单次最大拉取) */}
       <Pagination
         style={{ marginTop: 12, textAlign: 'right' }}
         simple
         current={listPage}
         pageSize={T_STEP}
-        total={listPage * T_STEP + (activities.length === T_STEP ? T_STEP : 0)}
+        total={allItems.length}
         onChange={setListPage}
       />
     </Spin>
-  );
+    );
+  }
 
   return (
     <Card
@@ -415,6 +491,117 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
                 </Descriptions>
               ),
             },
+            ...(isMe ? [{
+              key: 'follows' as const,
+              label: `关注${home?.data ? ` ${home.data.follow_count}` : ''}`,
+              children: (
+                <Spin spinning={followsLoading}>
+                  {follows.length === 0 && !followsLoading ? (
+                    <Typography.Text type="secondary">还没有关注任何人（在帖子或用户主页点「关注」即可）</Typography.Text>
+                  ) : (
+                    <List
+                      size="small"
+                      dataSource={follows}
+                      rowKey={(u) => String(u.user_id)}
+                      renderItem={(u) => (
+                        <List.Item
+                          style={{ cursor: 'pointer', padding: '8px 4px' }}
+                          onClick={() => onOpenUser?.(u.user_id, u.name)}
+                        >
+                          <List.Item.Meta
+                            avatar={<Avatar src={proxiedImage(u.head)} />}
+                            title={<Typography.Text strong>{u.name}</Typography.Text>}
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  )}
+                  {follows.length > 0 && (
+                    <Space style={{ marginTop: 8 }}>
+                      <Button size="small" disabled={followsPage <= 1} onClick={() => void loadFollows(followsPage - 1)}>上一页</Button>
+                      <Typography.Text type="secondary">第 {followsPage} 页</Typography.Text>
+                      <Button size="small" disabled={followsDone} onClick={() => void loadFollows(followsPage + 1)}>下一页</Button>
+                    </Space>
+                  )}
+                </Spin>
+              ),
+            }] : []),
+            ...(isMe ? [{
+              key: 'likes' as const,
+              label: '点赞',
+              children: (
+                <Spin spinning={likesLoading}>
+                  {likes.length === 0 && !likesLoading ? (
+                    <Typography.Text type="secondary">
+                      还没有点赞记录。网页端的点赞会自动归档到这里（此前在 App 里点的赞上游不提供查询，无法找回）。
+                    </Typography.Text>
+                  ) : (
+                    <List
+                      size="small"
+                      dataSource={likes}
+                      rowKey={(l) => String(l.tid)}
+                      renderItem={(l) => (
+                        <List.Item
+                          style={{ cursor: 'pointer', padding: '8px 4px' }}
+                          onClick={() => onOpenThread({ id: l.tid, title: l.title, user_name: '' } as InfoFeedItem)}
+                        >
+                          <List.Item.Meta
+                            title={<Typography.Text strong>{l.title}</Typography.Text>}
+                            description={<Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {fmtEpochSec(l.liked_at)} 赞过
+                            </Typography.Text>}
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  )}
+                </Spin>
+              ),
+            }] : []),
+            ...(isMe ? [{
+              key: 'favs' as const,
+              label: '收藏',
+              children: (
+                <Spin spinning={favsLoading}>
+                  {favs.length === 0 && !favsLoading ? (
+                    <Typography.Text type="secondary">
+                      还没有收藏。打开帖子的「☆ 收藏」按钮即可加入这里（收藏是本地标记，仅记录网页端的操作）。
+                    </Typography.Text>
+                  ) : (
+                    <List
+                      size="small"
+                      dataSource={favs}
+                      rowKey={(f) => String(f.tid)}
+                      renderItem={(f) => (
+                        <List.Item
+                          style={{ cursor: 'pointer', padding: '8px 4px' }}
+                          onClick={() => onOpenThread({ id: f.tid, title: f.title, user_name: '' } as InfoFeedItem)}
+                        >
+                          <List.Item.Meta
+                            title={<Typography.Text strong>★ {f.title}</Typography.Text>}
+                            description={<Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {fmtEpochSec(f.added_at)} 收藏
+                            </Typography.Text>}
+                          />
+                          <Button
+                            size="small"
+                            danger
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              sdgunApi.favoritesRemove(f.tid)
+                                .then(() => setFavs((cur) => cur.filter((x) => x.tid !== f.tid)))
+                                .catch(() => message.error('取消收藏失败'));
+                            }}
+                          >
+                            取消收藏
+                          </Button>
+                        </List.Item>
+                      )}
+                    />
+                  )}
+                </Spin>
+              ),
+            }] : []),
           ]}
         />
       </Spin>
@@ -447,6 +634,8 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
             ) : (
               chatMsgs.map((m) => {
                 const mine = m.from_user_id === myId;
+                // content 自适应解析:文本消息取正文,图片消息渲染缩略图(走代理)
+                const { text, images } = parseChatMessage(m.content);
                 return (
                   <div
                     key={m.msg_id}
@@ -465,7 +654,17 @@ export default function UserPanel({ userId, nameHint, me, onClose, onOpenThread 
                         whiteSpace: 'pre-wrap',
                       }}
                     >
-                      {msgText(m)}
+                      {text}
+                      {images.map((u) => (
+                        <Image
+                          key={u}
+                          src={proxiedImage(u)}
+                          fallback={u}
+                          width={200}
+                          style={{ borderRadius: 6, marginTop: text ? 4 : 0, display: 'block' }}
+                        />
+                      ))}
+                      {!text && images.length === 0 && '（暂不支持的消息类型）'}
                     </div>
                   </div>
                 );

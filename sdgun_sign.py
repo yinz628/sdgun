@@ -27,7 +27,7 @@ import requests as upstream_lib
 from fastapi import APIRouter
 from fastapi.concurrency import run_in_threadpool
 
-from sdgun_session import APP_HEADERS, MAIN_ORIGIN, store, upstream_client
+from sdgun_session import APP_HEADERS, MAIN_ORIGIN, UPSTREAM_TIMEOUT, store, upstream_client
 
 logger = logging.getLogger("sdgun.sign")
 
@@ -133,7 +133,7 @@ def _sign_view_row() -> Optional[dict]:
         r = upstream_client.get(
             MAIN_ORIGIN + "/mag/addon/v1/sign/signView",
             headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
-            timeout=(15, 20),
+            timeout=UPSTREAM_TIMEOUT,
         )
         store.absorb(r)
     except upstream_lib.RequestException as exc:
@@ -163,7 +163,7 @@ def _run_sign(manual: bool = False) -> dict:
                     MAIN_ORIGIN + "/mag/addon/v1/sign/signReward",
                     params={"uid": row["user_id"]},
                     headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
-                    timeout=(15, 20),
+                    timeout=UPSTREAM_TIMEOUT,
                 )
                 store.absorb(r)
                 payload = r.json()

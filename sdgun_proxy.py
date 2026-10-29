@@ -22,6 +22,7 @@ App 头自动补充:User-Agent(MAGAPPX) / mag-version / X-Requested-With / Refer
 模块划分:
   sdgun_session.py  上游身份常量 + 会话存储/自检/抓包解析(纯逻辑,可单测)
   sdgun_sign.py     每日签到(守护线程 + /sign 路由)
+  sdgun_watch.py    关注关键字监控(守护线程轮询信息流 + /watch 路由)
   sdgun_proxy.py    本文件:FastAPI 应用、转发核心、其余路由、静态托管
 
 运行:
@@ -33,12 +34,16 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import requests as upstream_lib
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import sdgun_favorites
+import sdgun_likes
 import sdgun_messages
 import sdgun_sign
+import sdgun_watch
 from sdgun_session import (
     APP_HEADERS,
     AUTH_COOKIE_NAME,
@@ -48,6 +53,7 @@ from sdgun_session import (
     find_login_record,
     store,
     upstream_client,
+    UPSTREAM_TIMEOUT,
 )
 
 if not logging.getLogger().handlers:   # 允许宿主(uvicorn/测试)自带日志配置
@@ -137,6 +143,7 @@ async def lifespan(_app: FastAPI):
     # import 保持零网络零阻塞,离线可测;会话全失效时启动等待也收敛到 ~15s
     await run_in_threadpool(store.init_from_disk)
     sdgun_sign.start_auto_sign()
+    sdgun_watch.start_watcher()
     yield
 
 
@@ -145,6 +152,9 @@ app = FastAPI(title="SDGun CORS Proxy", docs_url=None, redoc_url=None,
 
 app.include_router(sdgun_sign.router)
 app.include_router(sdgun_messages.router)
+app.include_router(sdgun_likes.router)
+app.include_router(sdgun_favorites.router)
+app.include_router(sdgun_watch.router)
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -163,6 +173,24 @@ async def cors_middleware(request: Request, call_next):
     response = await call_next(request)
     for k, v in CORS_HEADERS.items():
         response.headers[k] = v
+    return response
+
+
+# 入口页必须禁掉浏览器的"启发式缓存":index.html 由 StaticFiles 直出(带
+# ETag/Last-Modified 但没有 Cache-Control),浏览器会自行推算一个保鲜期,于是
+# 前端更新后用户可能长时间停在旧页面、引着已被删除的旧 assets(2026-10-22 上线
+# 实测:"看不到关注栏"就是旧 index.html 仍在本地缓存)。
+# 只针对入口页:no-cache 不是 no-store——允许存储但强制每次带 ETag/Last-Modified
+# 回源校验,内容没变时 StaticFiles 回 304,代价极低;带哈希的 /assets/** 是内容
+# 寻址(文件名即版本),保持现状不动,否则每次访问都要多一轮校验。
+_ENTRY_PATHS = {"/", "/index.html"}
+
+
+@app.middleware("http")
+async def entry_no_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in _ENTRY_PATHS:
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -214,7 +242,7 @@ async def forward(request: Request, url: str, keep_query: bool = True,
                 req_headers["Range"] = range_header   # <video> 起播/拖进度条依赖
         try:
             resp = upstream.request(request.method, url, headers=req_headers, data=body,
-                                    timeout=(15, 30), allow_redirects=follow_redirects,
+                                    timeout=UPSTREAM_TIMEOUT, allow_redirects=follow_redirects,
                                     stream=stream_mode)
         except upstream_lib.RequestException as exc:
             return None, None, f"{type(exc).__name__}: {exc}"
@@ -251,7 +279,11 @@ async def forward(request: Request, url: str, keep_query: bool = True,
             k: v for k, v in resp.headers.items()
             if k.lower() not in STRIP_RESP_HEADERS | {"content-length"}
         }
-        passthrough["Content-Length"] = resp.headers["content-length"]
+        # chunked 上游响应(重定向后的最终响应等)没有 content-length,此时不能
+        # 直接下标——KeyError 会让本应 502/206 的请求裸奔成 500。缺头时交给
+        # StreamingResponse 自动按 chunked 编码回传
+        if (cl := resp.headers.get("content-length")) is not None:
+            passthrough["Content-Length"] = cl
 
         def media_iter():
             try:
@@ -296,7 +328,7 @@ async def auth_replay_exact():
         try:
             resp = upstream_client.post(rec["url"], headers=rec["headers"],
                                         data=rec["body"].encode("utf-8"),
-                                        timeout=(15, 30), allow_redirects=False)
+                                        timeout=UPSTREAM_TIMEOUT, allow_redirects=False)
         except upstream_lib.RequestException as exc:
             return None, f"{type(exc).__name__}: {exc}"
         store.absorb(resp)
@@ -318,6 +350,78 @@ async def auth_replay_exact():
                          "session_updated": bool(payload.get("success"))})
 
 
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    """账号密码登录(WAP 通道,表单明文,2026-09-09 发现)。
+
+    端点是大写 User 的 /mag/user/v1/User/login——WAP 站 Vue 登录页
+    (app.sdgun.com.cn /mag/wap/v1/wap/waphome/login,登录分包 chunk 27)所用,
+    与 App 原生通道的小写 user/login(RSA 密文 + mag-ss-key,公钥不外发)不同,
+    这条通道 password 为明文表单,无 mag-ss-key,实测 requests 指纹可过。
+
+    ⚠️ 上游失败 3 次临时锁定登录,锁定计数信息在上游 msg 里(如"当前已失败 1/3 次"),
+    必须原样透传给前端;本端点绝不自动重试。
+
+    响应 data 含手机号与多枚 token(union/chat/cloud),敏感,只回传安全字段。
+    """
+    try:
+        payload = await request.json()
+    except ValueError:
+        return JSONResponse({"success": False, "msg": "请求体必须是 JSON"}, status_code=400)
+    account = str(payload.get("account") or "").strip()
+    password = str(payload.get("password") or "")
+    if not account or not password:
+        return JSONResponse({"success": False, "msg": "账号和密码不能为空"}, status_code=400)
+
+    # 与 WAP 页一致的表单字段(空串占位字段原样带上)
+    form = {"account": account, "password": password,
+            "phone": "", "code": "", "security_code": "", "country_code": ""}
+
+    def do():
+        try:
+            resp = upstream_client.post(
+                MAIN_ORIGIN + "/mag/user/v1/User/login",
+                headers=dict(APP_HEADERS, Cookie=store.cookie_header()),
+                data=form, timeout=UPSTREAM_TIMEOUT, allow_redirects=False)
+        except upstream_lib.RequestException as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+        store.absorb(resp)
+        return resp, None
+
+    resp, err = await run_in_threadpool(do)
+    if err:
+        logger.warning("[auth] 账号密码登录请求失败: %s", err)
+        return JSONResponse({"success": False, "msg": f"登录请求失败: {err}"}, status_code=502)
+    try:
+        up = resp.json()
+    except ValueError:
+        return JSONResponse({"success": False,
+                             "msg": "上游返回非 JSON(疑似被 WAF 拦截)",
+                             "http_status": resp.status_code}, status_code=502)
+
+    if not up.get("success"):
+        # 失败 msg 带锁定计数,原样透传;不能在这里重试
+        return JSONResponse({"success": False, "msg": up.get("msg") or "账号或密码错误"})
+
+    data = up.get("data") or {}
+    token = data.get("token")
+    if token:
+        store.set(AUTH_COOKIE_NAME, token)
+
+    # asyn_ask:登录成功后同步旧论坛(bbs)会话,签名全在 URL 上,GET 无 Cookie 触发
+    def sync_bbs():
+        for url in (up.get("asyn_ask") or [])[:3]:
+            try:
+                upstream_client.get(url, headers=dict(APP_HEADERS), timeout=UPSTREAM_TIMEOUT)
+            except upstream_lib.RequestException:  # noqa: BLE001 —— 同步失败不影响登录结果
+                pass
+    await run_in_threadpool(sync_bbs)
+
+    safe_user = {k: data.get(k) for k in ("user_id", "name", "head", "group_name", "group_id")}
+    logger.info("[auth] 账号密码登录成功: uid %s (name %s)", data.get("user_id"), data.get("name"))
+    return JSONResponse({"success": True, "user": safe_user, "session_updated": True})
+
+
 @app.get("/proxy-info")
 async def index():
     return {
@@ -328,8 +432,11 @@ async def index():
             "聊天服务": "/msg/**  → shuidan.chat.magcloud.net",
             "通用白名单代理": "/proxy?url=<encoded-url>(图片等,跟随重定向)",
             "外链跳桥": "/link?url=<encoded-url>(无 Cookie,绕开证书不匹配短链)",
-            "一键登录": "POST /auth/replay-exact",
+            "账号密码登录": "POST /auth/login {account, password}(WAP 通道,明文表单)",
+            "一键登录(重放)": "POST /auth/replay-exact",
             "签到": "GET /sign/status · POST /sign/run",
+            "关注关键字监控": "GET /watch/status|hits|rules · POST /watch/rules[/remove|/toggle|/run]"
+                              "(本地监控线程,新帖标题命中关键字即提醒)",
             "健康检查": "GET /health(60s 缓存的会话探活,?force=1 强制刷新)",
         },
         "cookie_source": "X-Sdgun-Cookie 头 > sdgun_session.json(自动吸收 Set-Cookie)",
@@ -376,6 +483,9 @@ async def generic_proxy(request: Request, url: Optional[str] = None):
     from urllib.parse import urlparse as _up
     u = _up(url)
     if u.scheme not in ("http", "https") or u.netloc not in ALLOWED_PROXY_HOSTS:
+        # 私信图片等新图床域名可能不在白名单——拒绝必须留痕,排障时从日志直接
+        # 读到被拒 URL 即可定位要加白的域名(而不是对着裂图猜)
+        logger.warning("[proxy] 拒绝非白名单目标: %s", url)
         return JSONResponse({"proxy_error": f"目标不在白名单: {u.netloc}"}, status_code=403)
     return await forward(request, url, keep_query=False, follow_redirects=True)
 
@@ -407,7 +517,7 @@ async def link_through(request: Request, url: Optional[str] = None):
             warnings.filterwarnings("ignore")  # 屏蔽 verify=False 的 InsecureRequestWarning
             current = url
             for _ in range(5):  # 最多跟 5 跳
-                resp = upstream_client.get(current, timeout=(15, 30), allow_redirects=False,
+                resp = upstream_client.get(current, timeout=UPSTREAM_TIMEOUT, allow_redirects=False,
                                            verify=False,
                                            headers={"User-Agent": APP_HEADERS["User-Agent"]})
                 if 300 <= resp.status_code < 400 and resp.headers.get("location"):

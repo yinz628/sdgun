@@ -5,8 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 代理四模块(sdgun_proxy 依赖 sdgun_session / sdgun_sign / sdgun_messages)
-COPY sdgun_proxy.py sdgun_session.py sdgun_sign.py sdgun_messages.py ./
+# 代理七模块(sdgun_proxy 依赖 sdgun_session / sdgun_sign / sdgun_messages / sdgun_likes / sdgun_favorites / sdgun_watch)
+COPY sdgun_proxy.py sdgun_session.py sdgun_sign.py sdgun_messages.py sdgun_likes.py sdgun_favorites.py sdgun_watch.py ./
 COPY webui/dist ./webui/dist
 
 # 抓包/会话数据目录（运行时挂载宿主机目录）

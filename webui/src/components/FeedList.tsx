@@ -6,6 +6,7 @@ import {
 import { sdgunApi } from '../api/sdgun';
 import { ApiError } from '../api/client';
 import { proxiedImage } from '../utils/media';
+import { sanitizeHtml } from '../utils/sanitize';
 import type {
   ChannelCatItem,
   IndexFragmentItem,
@@ -15,7 +16,9 @@ import type {
   UserSearchItem,
 } from '../types/sdgun-api-types';
 
-const STEP = 20;
+// 每页条数(上游实测支持 step=100:分类流/频道流/搜索均如实返回);
+// 20 为默认,可经分页器切换 20/50/100
+const STEP_OPTIONS = [20, 50, 100];
 
 /** 栏目定义：column_type=7 频道 / column_type=1 信息流分类 / 版块（circleTree→fid） */
 interface TabDef {
@@ -108,6 +111,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
   const [keyword, setKeyword] = useState(''); // 非空 = 搜索模式
   const [searchType, setSearchType] = useState<'thread' | 'user'>('thread');
   const [page, setPage] = useState(1);
+  const [stepSize, setStepSize] = useState(20);   // 每页条数,可切 20/50/100
   const [items, setItems] = useState<InfoFeedItem[]>([]);
   const [rawSearch, setRawSearch] = useState<SearchThreadItem[]>([]);
   const [userResults, setUserResults] = useState<UserSearchItem[]>([]);
@@ -206,7 +210,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
             setItems([]);
             setRawSearch([]);
           } else {
-            const resp = await sdgunApi.searchThreads(keyword, page, STEP);
+            const resp = await sdgunApi.searchThreads(keyword, page, stepSize);
             const raw = resp.list ?? [];
             setRawSearch(raw);
             setItems(raw.map(searchItemToFeed));
@@ -228,7 +232,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
       (async () => {
         setLoading(true);
         try {
-          const resp = await sdgunApi.forumThreads(active.id, page, STEP);
+          const resp = await sdgunApi.forumThreads(active.id, page, stepSize);
           const list = resp.list ?? [];
           setRawSearch([]);
           setUserResults([]);
@@ -250,17 +254,17 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
         let resp: Awaited<ReturnType<typeof sdgunApi.feed>>;
         if (active.kind === 'channel') {
           // 频道流真实分页：p>=2 必须带 content_id = totalList 的对应切片，否则服务端返回空
-          const cursor = page > 1 ? totalIds.slice((page - 1) * STEP, page * STEP) : undefined;
+          const cursor = page > 1 ? totalIds.slice((page - 1) * stepSize, page * stepSize) : undefined;
           resp = await sdgunApi.feed({
             channel_id: active.id,
             cat_id: catId!,
             p: page,
-            step: STEP,
+            step: stepSize,
             contentIds: cursor,
           });
           if (page === 1) setTotalIds(resp.totalList ?? []);
         } else {
-          resp = await sdgunApi.infoListV3(active.id, page, STEP);
+          resp = await sdgunApi.infoListV3(active.id, page, stepSize);
         }
         setRawSearch([]);
         setUserResults([]);
@@ -275,7 +279,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey, catId, page, keyword, searchType]);
+  }, [activeKey, catId, page, keyword, searchType, stepSize]);
 
   /** 关注用户（写操作） */
   const doFollow = async (u: UserSearchItem) => {
@@ -291,12 +295,17 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
     }
   };
 
-  // 服务端多数不返回 total：整页才有下一页，用当前页推算；
-  // 频道流例外——p=1 的 totalList 即全量 id，可精确分页（+少量广告位）
+  // 服务端多数不返回 total:此前按"当前页+1"窗口估算,simple 分页器输入大页码
+  // (如 100)会被组件收敛到窗口内,表现为"跳页不生效"。改为开放 PAGE_WINDOW
+  // 页的跳页窗口,翻到空页再收缩为当前页(即末页);频道流例外——p=1 的
+  // totalList 即全量 id,可精确分页(+少量广告位)
+  const PAGE_WINDOW = 100;
   const estimatedTotal =
     !searching && active?.kind === 'channel' && totalIds.length > 0
-      ? totalIds.length + STEP
-      : page * STEP + (items.length === STEP ? STEP : 0);
+      ? totalIds.length + stepSize
+      : items.length === 0 && page > 1
+        ? page * stepSize
+        : PAGE_WINDOW * stepSize;
 
   const title = searching
     ? `搜索“${keyword}”`
@@ -429,7 +438,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
                     className="feed-item-title"
                     style={{ cursor: 'pointer' }}
                     onClick={() => onOpenUser(u.user_id, u.name)}
-                    dangerouslySetInnerHTML={{ __html: u.user_title || u.name }}
+                    dangerouslySetInnerHTML={{ __html: sanitizeHtml(u.user_title || u.name) }}
                   />
                 }
                 description={
@@ -461,7 +470,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
                 title={
                   <Space size={6} wrap className="feed-item-title">
                     {searching && rawSearch[idx] ? (
-                      <span dangerouslySetInnerHTML={{ __html: rawSearch[idx].title }} />
+                      <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(rawSearch[idx].title) }} />
                     ) : (
                       <span>{item.title}</span>
                     )}
@@ -484,11 +493,16 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
       {!(searching && searchType === 'user') && (
         <Pagination
           style={{ marginTop: 12, textAlign: 'right' }}
-          simple
+          size="small"
+          responsive
+          showLessItems
+          showSizeChanger
+          pageSizeOptions={STEP_OPTIONS.map(String)}
           current={page}
-          pageSize={STEP}
+          pageSize={stepSize}
           total={estimatedTotal}
           onChange={(p) => setPage(p)}
+          onShowSizeChange={(_, s) => { setStepSize(s); setPage(1); }}
         />
       )}
     </Card>

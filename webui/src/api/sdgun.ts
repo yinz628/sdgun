@@ -4,12 +4,18 @@ import type {
   ChatMsgItem,
   ChatUnreadMsgResponse,
   CommentListResponse,
+  ConversationsResponse,
   DayReadFinishResponse,
+  FavoritesListResponse,
   GetRewardContentResponse,
   IndexPagesResponse,
   InfoListResponse,
   JsApiResponse,
+  LikesListResponse,
   LoadUsersResponse,
+  MyFollowsListResponse,
+  NotifyIndexResponse,
+  NotifyListResponse,
   RepairTokenResponse,
   ReplyAddResponse,
   RewardRecordResponse,
@@ -26,6 +32,11 @@ import type {
   UserSearchResponse,
   ContentAddApplaudResponse,
   FansAddResponse,
+  WatchHitsResponse,
+  WatchRule,
+  WatchRulesResponse,
+  WatchSettingsResponse,
+  WatchStatus,
 } from '../types/sdgun-api-types';
 
 /** 与抓包/代理对齐的接口封装（fid=0 已实测等价于真实 fid） */
@@ -84,6 +95,58 @@ export const sdgunApi = {
   followUser: (userId: string | number) =>
     postForm<FansAddResponse>('/mag/user/v1/UserRelation/fansAdd', { user_id: userId }),
 
+  /** 我的关注列表（user_id=自己；p/step 分页，无 total——条数<step 即末页） */
+  myFollowsList: (meUid: string | number, p = 1, step = 20) =>
+    getJson<MyFollowsListResponse>('/mag/user/v1/UserNotify/MyFollowsList', {
+      user_id: meUid, p, step, lat: 0, lng: 0,
+    }),
+
+  /** 点赞成功后上报本地归档（tid+标题；幂等）与查询历史（上游无"我的点赞"接口） */
+  likesAdd: (tid: number, title: string) =>
+    api.post('/likes/add', { tid, title }).then((r) => r.data as { added: boolean; total: number }),
+  likesList: (limit = 200) =>
+    getJson<LikesListResponse>('/likes/list', { limit }),
+
+  /** 帖子收藏（本地标记，可增删；上游收藏接口未逆向） */
+  favoritesAdd: (tid: number, title: string) =>
+    api.post('/favorites/add', { tid, title }).then((r) => r.data as { added: boolean; total: number }),
+  favoritesRemove: (tid: number) =>
+    api.post('/favorites/remove', { tid, title: '' }).then((r) => r.data as { removed: boolean; total: number }),
+  favoritesHas: (tid: number) =>
+    getJson<{ has: boolean }>('/favorites/has', { tid }),
+  favoritesList: (limit = 500) =>
+    getJson<FavoritesListResponse>('/favorites/list', { limit }),
+
+  /* ===== 关注关键字监控（本地代理，代理侧守护线程轮询信息流） ===== */
+
+  /** 监控状态：开关/间隔/监控源/规则与命中计数/最近一轮结果 */
+  watchStatus: () => getJson<WatchStatus>('/watch/status'),
+
+  /** 命中记录：since<0 取最新 limit 条；since>=0 只取更新的（前端游标） */
+  watchHits: (since = -1, limit = 100) =>
+    getJson<WatchHitsResponse>('/watch/hits', { since, limit }),
+
+  /** 规则列表（抽屉打开时拉取；与 watchStatus/watchHits 并发） */
+  watchRules: () => getJson<WatchRulesResponse>('/watch/rules'),
+
+  /** 新增规则：keywords 用逗号/顿号/空格分隔（同一规则内需全部命中） */
+  watchRulesAdd: (keywords: string, name = '') =>
+    api.post('/watch/rules', { keywords, name }).then((r) => r.data as WatchRulesResponse & { rule: WatchRule }),
+  watchRulesRemove: (id: number) =>
+    api.post('/watch/rules/remove', { id }).then((r) => r.data as WatchRulesResponse & { removed: boolean }),
+  watchRulesToggle: (id: number) =>
+    api.post('/watch/rules/toggle', { id }).then((r) => r.data as WatchRulesResponse & { rule: WatchRule | null }),
+
+  /** 立即检测一次（代理侧同步执行一轮轮询） */
+  watchRun: () =>
+    api.post('/watch/run').then((r) => r.data as { ok: boolean; new_items: number; hits_added: number; error: string | null }),
+
+  /** 监控设置（目前只有提醒时间窗 window_hours: 12/24/48） */
+  watchSettings: () => getJson<WatchSettingsResponse>('/watch/settings'),
+  watchSettingsSet: (windowHours: number) =>
+    api.post('/watch/settings', { window_hours: windowHours })
+      .then((r) => r.data as WatchSettingsResponse),
+
   /** 帖子正文页 HTML（正文在内嵌 var row = {...}.content，用 extractThreadRow 提取） */
   fetchThreadHtml: (tid: number | string) =>
     api
@@ -133,9 +196,14 @@ export const sdgunApi = {
     }
   },
 
-  /** 发表评论（circle_id 来自 threadViewPage 的 var row；成功后 data 即新评论） */
-  addComment: (tid: number | string, content: string, circleId?: string | number) =>
-    postForm<ReplyAddResponse>('/mag/circle/v1/Forum/replyAdd', {
+  /**
+   * 发表评论 / 回复某条评论（circle_id 来自 threadViewPage 的 var row；成功后 data 即新评论）。
+   * 定向回复传 replyId（目标评论 id，WAP replyCmtItem 的 reply_id=o.id），表单才带 reply_id；
+   * 普通评论不带该字段。
+   */
+  addComment: (tid: number | string, content: string, circleId?: string | number,
+               replyId?: string | number) => {
+    const form: Record<string, string | number> = {
       source: 'qiniu',
       from_push: '',
       tid,
@@ -144,7 +212,10 @@ export const sdgunApi = {
       auth: '',
       video: '',
       vest_id: '',
-    }),
+    };
+    if (replyId != null && replyId !== '') form.reply_id = replyId;
+    return postForm<ReplyAddResponse>('/mag/circle/v1/Forum/replyAdd', form);
+  },
 
   /** 帖子悬赏/红包内容 */
   reward: (tid: number) =>
@@ -183,6 +254,17 @@ export const sdgunApi = {
       peer_id: peerId,
       limit,
     }),
+
+  /** 本地归档的会话列表（按对端分组摘要，me=user<uid>），私信入口用 */
+  localConversations: (meUid: string | number) =>
+    getJson<ConversationsResponse>('/messages/conversations', { me: `user${meUid}` }),
+
+  /** 通知中心索引：各分类（评论/@/赞/关注/私信）未读计数与最新一条预览 */
+  notifyIndex: () => getJson<NotifyIndexResponse>('/mag/user/v3/userNotify/userNotifyIndex'),
+
+  /** 通知明细（code=comment/at/applaud/focus；条目 link 可跳回帖子） */
+  notifyList: (code: string) =>
+    getJson<NotifyListResponse>('/mag/user/v3/UserNotify/notifyList', { code }),
 
   /* ===== 用户主页（第四份抓包 sdgun-2026-08-25） ===== */
 

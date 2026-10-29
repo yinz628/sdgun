@@ -1,7 +1,7 @@
 # SDGun「水弹社区」App 抓包分析报告
 
-> 数据源：8 份抓包（Anything Analyzer 导出，累积 1608 条请求），敏感值（token / 手机号 / 会话）已在文档中脱敏。
-> 正文（§0–§4）基于第一份抓包，后续新发现按时间顺序沉淀在附录 1–9（附录 9 为线上实测，无抓包），**读旧结论前先看对应附录的修正**。
+> 数据源：9 份抓包（Anything Analyzer 导出，累积 1773 条请求），敏感值（token / 手机号 / 会话）已在文档中脱敏。
+> 正文（§0–§4）基于第一份抓包，后续新发现按时间顺序沉淀在附录 1–12（附录 9 为线上实测、附录 11 为本地功能实现、附录 12 为 WAP 源码逆向，均无抓包），**读旧结论前先看对应附录的修正**。
 
 ## 抓包与结论索引
 
@@ -16,10 +16,15 @@
 | 7 | sdgun-2026-08-26.json | 266 | 发表评论 + 看链接帖 | replyAdd；外链证书坑（/link 跳桥）；WAP 页图片改写 |
 | 8 | sdgun-2026-08-29.json | 45 | 私信回复收发全链路 | unReadMsg 拉取即清（修正附录 5）；chatToken 稳定；重登不影响网页会话（附录 8） |
 | 9 | —（线上实测） | — | 「帖子不存在」的 502 语义 | tid 不存在/不可见统一报 502「您的网络有些问题」；0 阅读无内容帖 = 刚发即删/审核中；含一次误判修正记录（附录 9） |
+| 10 | sdgun-2026-09-09.json | 165 | 会话续期 + 新鲜登录报文 | 触发附录 10：WAP 通道明文登录被发现并**实测登录成功**，网页端账号密码登录落地（重放降级为备用） |
+| 11 | —（本地功能实现） | — | 关注关键字新帖提醒 | 无上游新接口：复用 v2 频道流做「新帖发现」源，代理侧守护线程轮询 + 本地规则匹配（附录 11） |
+| 12 | —（WAP 源码逆向） | — | 评论楼中楼与定向回复 | `commentList` 条目可带 `to_comment` 引用；`replyAdd` 加 `reply_id` 即定向回复（附录 12） |
 
-运维要点速查：会话三个 Cookie / 重放登录（App 内重新登录会使旧 token 失效，点网页「登录」恢复）/
-自动签到（每日 08:05 UTC+8）/ 上游必须 requests（WAF 头序）/ 图片与外链全走代理路由 /
-502「您的网络有些问题」= 帖子不存在或不可见（非网络问题，附录 9）。
+运维要点速查：会话三个 Cookie / **账号密码登录**（WAP 通道明文表单，附录 10；重放抓包为备用）/
+自动签到（每日 08:05 UTC+8）/ **关注关键字监控**（代理侧轮询信息流，附录 11；首次只建基线）/
+上游必须 requests（WAF 头序）/ 图片与外链全走代理路由 /
+502「您的网络有些问题」= 帖子不存在或不可见（非网络问题，附录 9）/
+VPS 侧 Docker 网络（策略路由回程、容器 DNS 固定）三类事故与鉴别见 README「VPS 的网络要点」。
 
 ## 0. 总体架构判断
 
@@ -242,8 +247,12 @@ Body: account=TATang&password=<RSA加密后Base64，256字节>
 
 ### 重要实测结论（网页版登录可行性）
 
+> ⚠️ 2026-09-09 修正：第 2 条的「最终方案」已降级为备用——WAP 通道存在**明文账号密码登录**
+> （大写 `User` 的 `/mag/user/v1/User/login`，无需 RSA 公钥与 mag-ss-key），网页端已落地，
+> 详见**附录 10**。以下结论针对原生通道仍然成立。
+
 1. **多点会话共存**：手机端重新登录后，旧 token 依然有效 → 网页版与 App 可同时在线。
-2. **✅ 完整重放登录已验证可行（最终方案）**：把抓包里的登录请求**原样**重放（同 mag-ss-key +
+2. **✅ 完整重放登录已验证可行（原生通道，现为备用方案）**：把抓包里的登录请求**原样**重放（同 mag-ss-key +
    同 PHPSESSID/server_session Cookie + 同密文），服务端接受并签发新 token。
    之前裸重放（缺 mag-ss-key/Cookie）失败并计入 1 次密码错误——**密文本身无时间戳绑定，
    失败原因是缺配套的 mag-ss-key**。代理 `/auth/replay-exact` 即此实现，网页「登录」按钮调用它。
@@ -571,9 +580,296 @@ count=1264、列表内容、p1–p3 分页、order=1/2 排序全部相同）；�
 同错。webui 保留 v2→v1 防御性回落（`sdgunApi.comments`），仅用于抵御单一接口
 版本波动。
 
+**上游「真 502」的鉴别（2026-09-09 晚补充）**：本项目的 502 有三种来源，形状各异——
+① JSON `code=502`「您的网络有些问题」= 帖子不存在/不可见（本附录主题）；
+② 代理返回的 JSON `{"proxy_error": ...}` = 我们到上游的网络层失败（重试耗尽）；
+③ **上游自身的 nginx 502 HTML 页**（`<center><h1>502 Bad Gateway</h1>`）或
+`SQLSTATE[HY000] [2002] Connection refused` JSON = **sdgun 服务端故障**（实测其
+数据库宕机会让 jsApi/信息流/搜索全挂，且启动自检会误报"所有候选 Cookie 无登录态"
+——是上游无法校验会话，不是会话真失效）。鉴别手段：看响应体形状；手机 App 同时
+报错即为上游问题，等其自愈即可，会话在恢复后自动重新校验通过。
+
 **前端落地**（webui，后端代理无改动）：
 - `ThreadPanel`：识别 threadViewPage 的 200 错误页（`css/user/error-` 标记/错误文案），
   正文区显示「该帖已不可访问（可能发表后即被删除、审核中或不存在）」，
   与「本来就没有正文（付费/隐藏/纯图帖）」区分开；
 - code=502 的评论报错显示「帖子不存在或已不可见（可能刚被删除或审核中）」，
   不再透传上游误导性文案「您的网络有些问题」。
+
+---
+
+## 附录 10：WAP 通道明文登录——网页端账号密码登录（2026-09-09 发现，推翻附录 2「仅重放」结论）
+
+背景：会话再次失效，用 sdgun-2026-09-09.json（165 条，含当日新鲜录制的登录请求）恢复会话时，
+顺带把「真·账号密码登录」重新调研了一遍——结论是**可行**，只是不在 App 原生通道上。
+
+### 发现过程
+
+- 附录 2 的「公钥不外发 → 只能重放」只对**原生通道**（小写 `/mag/user/v1/user/login`，
+  RSA 密文 + mag-ss-key）成立；启动→登录全流程抓包（附录 3）显示 App 登录前不加载任何
+  服务端 JS，加密在原生壳内，密钥确实拿不到。
+- 突破口是 WAP 站自己的登录页：`lyutils.js` 的 `toWapLogin` → `/mag/wap/v1/wap/waphome/login`。
+  该页是 Vue SPA（`/public/wap/dist/static/js/` 下的分包），登录组件在懒加载 chunk 27
+  （`27.0e659508fa382928bc6a.js`，chunk 哈希表在 manifest.js）。
+- 组件源码（webpack 模块 530）`normalLoginMethod`：
+  `this.$http.post("/mag/user/v1/User/login", this.user, …)`，其中
+  `user = {account, password, phone, code, security_code, country_code}`——**明文提交，
+  无任何加密**；`$http` 封装为 axios + qs（`application/x-www-form-urlencoded`）。
+- 普通登录**无图形验证码**；验证码（security_code，code=1009 触发）只用于短信通道的
+  发送验证码。成功后页面会顺手 POST 响应里的 `asyn_ask`（bbs 旧论坛会话同步）。
+
+### 线上实测（2026-09-09）
+
+- `POST https://mag1.sdgun.net/mag/user/v1/User/login`，表单 `account=<不存在的账号>&password=…`
+  （+ 空串占位字段），App UA + requests 指纹：
+  `{"success":false,"msg":"账号或密码错误…（当前已失败 1/3 次）","code":0}`
+- 端点在 **mag1** 域名即可用（无需走 app.sdgun.com.cn）；接受明文；**不需要 mag-ss-key**；
+  requests 头序可通过。
+- ⚠️ 失败响应带**临时锁定计数**（3 次锁定），且不存在 的账号也计数——
+  计数疑似绑定来源 IP，切勿拿错误凭据反复探测。
+
+### 代理与前端落地
+
+- 代理 `POST /auth/login {account, password}`：代为提交明文表单（带当前会话 PHPSESSID），
+  成功后吸收 Set-Cookie + `data.token`，触发 `asyn_ask`（GET 无 Cookie，签名全在 URL），
+  只回传安全字段（user_id/name/head/group_name/group_id；响应含手机号与多枚 token，不透传）。
+- 空账号/密码在代理层直接 400，不浪费锁定计数；上游失败 msg（含计数）原样透传到 UI。
+- 前端 UserBar：「登录」按钮改为账号密码弹窗；重放登录（`/auth/replay-exact`）降级为
+  备用入口（「用最新抓包重放登录（免输密码）」）。
+
+### 结论修正
+
+- 「重放是最终方案」降级为**备用**：主路是账号密码登录（WAP 通道）；改密码后直接可登录，
+  无需重录抓包；重放的「密文有效期数小时～1 天」限制不再关键。
+- 附录 2 第 3 条「公钥不可获取」对原生通道仍成立，但 WAP 通道登录根本不需要公钥。
+- 安全提醒：这条通道是明文表单，网页端登录等于把密码交给本机代理转发——仅限本地/可信
+  局域网使用，切勿暴露公网（与现有 README 部署警告一致）。
+
+### 落地验证与后续观察（2026-09-09 晚）
+
+- ✅ **真实凭据端到端登录成功**（VPS http://192.168.2.197:50002 网页弹窗提交，
+  代理 `/auth/login` 换得新会话，jsApi 恢复登录态）——功能正式可用。
+- 📉 **同日观察：抓包派生会话的寿命极不可靠**。当天 19:59（UTC+8）录的新抓包，
+  其会话 20:59 校验仍通过，21:15 即被上游清理（期间无网页端操作，疑似手机 App
+  端活动触发）。结合附录 2 第 5 点「服务端不定时清理 token」——**抓包会话随时可能
+  失效，账号密码登录才是可持续的正路**；抓包仅保留作冷启动兜底。
+- 运维插曲（记录在 README VPS 章节）：部署当晚 VPS 的 `sdgun-upstream-routes`
+  直连路由服务 inactive+disabled，容器到上游整体断连，症状与「会话全失效」雷同
+  （启动自检所有候选报"无登录态"）。上游"全候选失败"时先查路由/连通性再怀疑 Cookie。
+
+---
+
+## 附录 11：关注关键字监控（本地功能，2026-10 实现，无抓包）
+
+背景：想要「盯住某些关键字的新帖」（如二手交易区的「出 + glock」）。上游没有订阅/关键词
+推送接口，只有信息流列表。本功能是**纯本地实现**：规则、命中、已见集合全在代理进程内维护，
+没有新增任何上游接口调用——用的仍是附录 4/5 已逆向的首页框架与 v2 频道流。
+
+### 路由表（sdgun_watch.py，`/watch/**`）
+
+| 路由 | 说明 |
+|---|---|
+| `GET /watch/status` | `{enabled, interval, source, rule_count, hit_count, polls, last_ok_at, last_error, last_error_at}` |
+| `GET /watch/rules` | `{rules: [...]}` |
+| `POST /watch/rules` | body `{name?, keywords: str\|list}` → `{rule, rules}`；校验失败 400 `{msg}` |
+| `POST /watch/rules/remove` | body `{id}` → `{removed, rules}` |
+| `POST /watch/rules/toggle` | body `{id}` → `{rule\|null, rules}`（停用而不删除，便于临时静音） |
+| `GET /watch/hits?since=-1&limit=100` | `{hits, max_hit_id, total}`；`since<0` 取最新，`since>=0` 取 `hit_id>since`（前端游标） |
+| `GET /watch/settings` | `{window_hours}`（提醒时间窗，12/24/48） |
+| `POST /watch/settings` | body `{window_hours}` → `{window_hours}`；非法值 400 `{msg}` |
+| `POST /watch/run` | 立即检测一次（线程池执行 `poll_once`） |
+
+### 上游调用（两种源形态）
+
+1. 监控源解析（只需成功一次，结果缓存进 `sdgun_watch.json` 的 `source`）。优先级：
+   `SDGUN_WATCH_FID` > `SDGUN_WATCH_CHANNEL_ID`+`SDGUN_WATCH_CAT_ID` > 缓存 > 自动解析；
+   自动解析为 `GET /mag/index/v2/index/pages` → `index_fragment`（JSON 字符串）→ 第一个
+   `column_type==7` 的频道（实测「玩具交易区」）→ `GET /mag/info/v3/channel/channelConfigById?channel_id=` →
+   优先 `cat_name` 含「新帖」的分类，否则 `info_config[0]`。
+2. 每轮轮询按源形态二选一：
+   - **版块源（`fid`）**：`GET /mag/circle/v1/Forum/threadList?fid=&p=1&step=50`。
+     条目字段名与频道流完全不同（`tid`/`subject`/`dateline`/`forum_name`），
+     由 `_normalize_thread_item` 归一化成 ingest 认的形态（`id`/`type=2`/`type_value`/`title`/…）。
+     该接口**没有 `totalList`**：置顶旧帖靠 `seen_ids` 去重自然吸收（首轮只建基线，不会误报）。
+   - **频道分类源（`channel_id`+`cat_id`）**：`GET /mag/info/v2/channel/infoListByCatId?channel_id=&cat_id=&p=1&step=50&tab=0&is_app_first=-1`，
+     取 `list` 条目 + `totalList`（全量有序 id，用于过滤广告位）。
+3. 全部走 `sdgun_session.upstream_client`（requests，WAF 头序）并 `store.absorb(resp)`，
+   Cookie 取 `store.cookie_header()`。
+4. **换源自动重建基线**：`poll_once` 在解析出源后比较「实际轮询目标」（`fid` 或
+   `channel_id`+`cat_id` 组合；`resolved_at` 每轮都变，不能直接比整个 dict），不同则
+   `reset_baseline()`（清空 `seen_ids`、`initialized=false`，**规则与命中历史保留**）再继续本轮。
+   旧目标必须在解析**之前**读取——`_resolve_source` 命中 env/自动解析时会先把新源落盘，
+   之后再比就永远相等、换源不会重建基线（会刷屏）。
+
+### sdgun_watch.json 结构（DATA_DIR，VPS 挂载卷）
+
+```json
+{
+  "rules": [{"id": 1, "name": "", "keywords": ["出", "glock"], "enabled": true, "created_at": 1700000000}],
+  "hits": [{"hit_id": 1, "tid": 123, "content_id": 456, "title": "...", "user_name": "...",
+            "publish_time_str": "1小时前", "forum_name": "玩具交易区",
+            "keywords": ["出"], "rule_ids": [1], "created_at": 1700000000}],
+  "next_rule_id": 2, "next_hit_id": 2,
+  "seen_ids": [456, 457],
+  "initialized": false,
+  "source": {"fid": 176, "forum_name": "", "resolved_at": 1700000000},
+  "poll": {"polls": 0, "last_ok_at": 0, "last_error": null, "last_error_at": 0},
+  "settings": {"window_hours": 24}
+}
+```
+
+（`source` 有两种形态：版块源 `{"fid": …, "forum_name": …}` 与频道分类源
+`{"channel_id": …, "cat_id": …, "channel_name": …}`。）
+
+上限：`hits ≤ 1000`（`MAX_HITS`）、`seen_ids ≤ 30000`（`MAX_SEEN_IDS`，FIFO 裁剪，最旧先出）；
+规则 ≤ 50 条、每条 ≤ 8 个关键字、单关键字 ≤ 40 字符。原子落盘（`atomic_write_json`）。
+
+**保留策略的两个不变式**（2026-10-22 多日运行后的反馈修复）：
+
+1. `seen_ids` 必须覆盖「最长时间窗（48h）× 峰值发帖速率」——实测交易区约 100+ 帖/小时，
+   48h ≈ 5000 条，30000 给了 6 倍余量。原值 2000 约 20 小时即被 FIFO 挤掉，短于 48h 窗口，
+   于是被回帖翻起的老帖会因「已见记录已丢失」重复命中。
+2. 命中另按 **tid 兜底去重**（`_hit_tids`，不单独持久化，从已加载 `hits` 重建、随命中裁剪同步
+   移除）：生成命中前若该 `tid` 已有命中记录在保留期内则跳过（仍记 `seen_ids`）。这样即使
+   `seen_ids` 被裁剪、或因换源 `reset_baseline` 被清空，同一条帖子也不会二次提醒；只有它的
+   命中记录本身被 FIFO 裁掉（>1000 条之后）才允许重新命中。
+
+### 设计取舍
+
+- **为什么在代理侧轮询，而不是前端匹配**：① 页面不开也要能发现（前端轮询只在标签页存活期间
+  有效）；② 上游请求必须带 App 身份头与 Cookie，前端直连会被 WAF 挡（附录 3/4）；
+  ③ 与签到/私信归档同一模式（守护线程 + 本地 JSON），前端只做展示与规则管理。
+- **为什么用 v2 频道流做源、并用 `totalList` 过滤广告**：v2 频道流是唯一带「全量有序 id」
+  的列表接口（附录 5 的翻页游标就是它），`p=1` 的 `totalList` 可判定条目是否为真实内容
+  （广告位条目不在其中）；再叠加「标题含**商家广告**恒丢弃」的兜底。`step=50` 是取「一屏
+  最新的量」——间隔 60s 时新帖通常只有个位数，50 条足够覆盖；`seen_ids` 保证不重复命中。
+- **为什么还需要版块源（`fid`）**：频道分类流是**策展视图**，会漏新帖（见「上线实测与修正」
+  第三条），交易类关键字建议直接用版块 `threadList`；代价是它没有 `totalList`，广告过滤
+  只能靠「标题含商家广告」那条兜底。
+- **基线语义**：`initialized=false` 的首轮只把当前列表 id 记入 `seen_ids`，**不产生命中**。
+  否则首次部署就会把首页 50 条历史帖全部弹给用户。命中因此「自部署（或首次轮询）起累积」，
+  不回溯历史帖；**换监控源同样自动重建基线**（规则与命中历史保留）；删掉 `sdgun_watch.json`
+  等价于重建基线（旧的命中记录一并丢失）。
+- **匹配语义**：规则内多关键字 **AND**（全部 casefold 包含于标题 casefold），规则之间 **OR**；
+  停用的规则不参与匹配（保留规则便于改回）。
+- **提醒时间窗（`settings.window_hours`，默认 24，取值 12/24/48）**：生成命中前检查条目
+  `create_time`（epoch 秒）是否早于 `now - window_hours*3600`，是则只记 `seen_ids`、
+  不产生命中——这是对「旧帖被算法翻出」最直接的压制手段。**没有 `create_time` 的条目
+  （如频道源）一律放行**（fail-open）：宁可多提醒一次，也不要因为上游少给一个字段就整片漏帖。
+  该值由前端抽屉里的「只提醒 N 小时内发布」下拉通过 `POST /watch/settings` 改，服务端持久化。
+- **已读/未读是纯前端本地状态**：上游没有"已读"概念。前端把**已读帖子 tid** 存浏览器
+  localStorage（`sdgunWatchReadTids`，上限 2000 条只留最新——不小于后端 `MAX_HITS` 1000，
+  免得已读记录先于命中被裁掉），命中列表分「未读/已读」两类、按最新在上展示，点开即已读；
+  顶栏角标 = 未读命中数（刷新页面不清零）。**按 tid 而不是 hit_id**：同一个帖子会换 hit_id
+  （历史去重只留最新一条、hits 超 1000 条 FIFO 裁剪、seen 丢失后重新命中），按 hit_id 记
+  会表现为"之前已读的帖子又变回未读"（用户实测反馈）；旧版本按 hit_id 存的数据在读取时
+  用命中列表自动迁移（`migrateWatchReadFromHitIds`，幂等）。与通知游标
+  `sdgunWatchSeen`（决定"弹过提醒没有"）是两件互不相干的事。
+- **一切以「发帖时间」为准，而不是列表顺序/回帖时间**（2026-10-22 用户反馈）：版块
+  `threadList` 实为**最后活动置顶**排序（实测：昨天创建的帖因有新回复，排在 2 小时前的帖
+  上面），因此 ① 命中记录存 `publish_time`（发帖 epoch 秒，来自条目 `create_time`），前端
+  按它倒序展示（`publish_time` 为 0 的旧记录回退 `created_at`）；② 生成命中前用**规则创建
+  时间**再过滤一道——只有发布晚于（或等于）规则 `created_at` 的帖才算命中，多规则命中时只
+  保留满足者（`keywords`/`rule_ids` 也只含它们），全部不满足则该帖不生成命中（仍记 `seen_ids`）。
+  语义是"规则从创建那一刻起盯新帖"，与基线不回溯一致，消除按回帖时间触发的误报。
+  无 `create_time` 的条目（频道源）两道门槛都放行（fail-open）。
+
+### 上线实测与修正（2026-10-22）
+
+功能上线后真实数据暴露三点，均已修正：
+
+- **聚焦流的条目不能按 `type_value` 取 tid**：频道 6 的第一个分类 `cat_id=1`「无余」是
+  聚焦精选流，条目 `type=6`、`type_value` 恒为分类 id（实测 `'198'`），按 `type_value`
+  取 tid 会把通知指向错误帖子。修正为与前端 `media.threadTid` 同一口径：条目 `link` 里的
+  `tid=` 优先 → 否则 `type==2` 的 `type_value` → 否则条目 `id`。实测「今日新帖/玩具交易」
+  流条目 `type=2`、`type_value` 即真实 tid（如 `'4376213'`）。
+- **自动解析优先「新帖」类分类**：原实现取 `info_config[0]`，线上选中「无余」（聚焦精选流：
+  `type=6` 混合内容、`totalList` 为空、混入旧帖），不适合「新帖发现」。现改为优先取
+  `cat_name` 含「新帖」的分类，找不到才用第一个。
+- **频道流是策展视图，会漏新帖 → 新增版块源（`SDGUN_WATCH_FID`）**：用户反馈「搜索里能看到
+  新帖、关注列表没有」。实测（2026-10-22）玩具交易区 7 分钟前 / 11 分钟前的新帖**不在**
+  频道 `cat3` `p=1` 的 50 条里，而版块 `threadList?fid=176` 前 50 条就包含它们——频道分类流
+  是运营策展视图（只收精选/推荐内容），版块列表才是该版块的全量时间序。故新增 `fid` 源
+  （`_fetch_feed` 分支 + `_normalize_thread_item` 字段归一化），并新增**换源自动重建基线**
+  （否则切源瞬间新源里满屏旧帖会被当新帖弹给用户）。
+  **交易类关键字建议直接用 `SDGUN_WATCH_FID`**；VPS 部署固定
+  `-e SDGUN_WATCH_FID=176`（玩具交易区，`deploy/deploy_common.py` 的 `DOCKER_RUN`）。
+
+### 已知限制
+
+- **旧帖被算法重新翻出可能误报**：列表没有可信的发布时间序——版块 `threadList` 是
+  「最后活动置顶」排序，频道源条目只带相对时间文案 `publish_time_str`，判定「新帖」只能靠
+  `seen_ids` 集合。现已加**提醒时间窗**（`settings.window_hours`）与**规则创建时间门槛**
+  （都基于版块源的 `create_time` 精确过滤，见「设计取舍」），把窗口外的旧帖、规则创建前
+  发布的旧帖一并压掉；但频道源没有该字段、走 fail-open，故这类源仍可能偶发一次误报。
+- 监控用的是代理当前会话，会话失效期间轮询失败（`last_error` 留痕、面板脚注展示），
+  重新登录后自动恢复；`SDGUN_WATCH_INTERVAL` 最小 20 秒，不要调得比上游缓存更激进。
+- **频道分类流是策展视图，可能漏帖**：实测玩具交易区的新帖会缺席 `cat3` 的首页 50 条
+  （见「上线实测与修正」第三条），因此「监控源确实覆盖目标帖」是使用前提。要覆盖某个版块
+  的全量新帖，用 `SDGUN_WATCH_FID=<版块 fid>` 指定版块源；要盯别的时间序频道则用
+  `SDGUN_WATCH_CHANNEL_ID` + `SDGUN_WATCH_CAT_ID`（**两者都设**）。优先级
+  `SDGUN_WATCH_FID` > channel/cat > 缓存 > 自动解析，两者同时设时以 fid 为准；
+  换源会自动重建基线（规则与命中历史保留），不需要手动删 `sdgun_watch.json`。
+
+---
+
+## 附录 12：评论楼中楼与定向回复（WAP 源码逆向 + 实测样本，无新抓包）
+
+背景：网页端评论区此前只能发普通评论，也看不到"回复某条评论"的引用关系。上游其实早就
+支持楼中楼——`commentList` 的条目带引用对象，`replyAdd` 多一个 `reply_id` 参数即可定向回复。
+
+### `to_comment`：被回复评论的引用
+
+`commentList`（v1/v2 响应结构一致，附录 1/附录 9 已确认两版逐字段相同）每条评论可带
+`to_comment`，为空时上游给 **`[]` 或 `null`**（两种形态都出现过，前端按"没有 `id` 就当不存在"处理）：
+
+```json
+{
+  "id": "<被回复评论的 pid>",
+  "user_id": "<被回复者 user_id>",
+  "user_name": "<被回复者昵称>",
+  "user_head": "<被回复者头像>",
+  "content": "<被回复评论的正文 HTML>",
+  "time": "<相对时间文案>",
+  "floor": "<楼层号>",
+  "is_publisher": "<是否楼主>"
+}
+```
+
+要点：
+
+- **回复与主评论平铺在同一个 `list` 里**，没有嵌套结构——楼中楼关系只由 `to_comment` 表达，
+  按 `to_comment.id` 反查即可还原引用关系。
+- `content` 是**富文本 HTML**，来自社区用户，渲染前必须过消毒链路
+  （`media.ts renderRichText` = `prepareCommentHtml` → `sanitizeHtml`）。
+- `id` 是**字符串**（与 `CommentItem.id` 同一口径，即楼层 pid）；`floor` 上游有时给数字有时给字符串。
+
+### `reply_id`：定向回复参数
+
+回复某条评论用的是**同一个** `POST /mag/circle/v1/Forum/replyAdd`（附录 7），表单只多一个
+`reply_id=<目标评论 id>`，其余字段（`source=qiniu`/`tid`/`circle_id`/`content`/`auth`/`video`/
+`vest_id`/`from_push`）与普通评论完全相同。来源是 WAP 源码的 `replyCmtItem`：
+
+```js
+onCommentAction({ tid, reply_id: o.id, circle_id, content, ... })
+```
+
+即 `reply_id` 直接取被回复评论对象的 `id`（不是 tid、不是 floor），与 `to_comment.id` 是同一套 id。
+
+### 与 `replyAddV1`（Discuz 帖）的关系
+
+上游另有一个 `replyAddV1`，用于 `source == 'dz'` 的 Discuz 老帖（表单语义与返回略有差异）。
+本工具**固定走 `replyAdd` + `source=qiniu`**：抓包里所有帖子（含从 Discuz 迁移来的）用该组合
+发帖/评论均成功。若将来遇到明确只认 `replyAddV1` 的帖子，可作为扩展点单独加分支
+（届时 `reply_id` 语义需再核对）——当前不改。
+
+### 前端落地（`webui/src/components/ThreadPanel.tsx`）
+
+- 有 `to_comment.id` 的评论：正文上方渲染**引用块**——浅灰底 + 左侧竖线 + 小一号字，
+  显示 `@user_name` 与消毒后的引用原文（样式对齐 WAP 的 `comment-feed`）。
+- 每条评论头部有「回复」小按钮（与点赞数同区）：点击设 `replyTarget={id, user_name}`，
+  输入框 placeholder 变为「回复 @name」，上方出现可关闭的 `<Tag>回复 @name</Tag>`（关闭即取消）；
+  点其它评论的「回复」直接切换目标。
+- 提交时若 `replyTarget` 非空 → `addComment(..., replyId)`（表单带 `reply_id`）；成功后清空输入与
+  回复目标、回第 1 页刷新（与普通评论一致）。切换帖子时一并清空 `replyTarget`。
+- 引用块整体**不做跳转**（目标评论可能不在当前页，跳转需额外定位逻辑，收益低）。

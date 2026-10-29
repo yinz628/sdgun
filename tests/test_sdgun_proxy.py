@@ -16,6 +16,7 @@ import os
 from urllib.parse import quote
 
 import pytest
+import requests
 
 import sdgun_proxy
 from sdgun_proxy import AUTH_COOKIE_NAME, _rewrite_html_images
@@ -184,6 +185,34 @@ class TestRoutes:
         assert r.status_code == 204
         assert r.headers["access-control-allow-origin"] == "*"
 
+    def test_entry_page_is_no_cache(self, client):
+        # 回归:index.html 没有 Cache-Control 时浏览器会启发式缓存,前端更新后
+        # 用户长时间停在旧 bundle 上(2026-10-22"看不到关注栏"事故)。
+        # webui/dist 存在时根路径由 StaticFiles 托管,TestClient 可直接测。
+        r = client.get("/")
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-cache"
+
+    def test_index_html_path_is_no_cache(self, client):
+        r = client.get("/index.html")
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-cache"
+
+    def test_hashed_assets_keep_default_caching(self, client):
+        # 带哈希的 /assets/** 是内容寻址,不应被入口页的 no-cache 波及
+        import re
+        m = re.search(r'src="(/assets/[^"]+\.js)"', client.get("/").text)
+        assert m, "构建产物 index.html 里没有 /assets/*.js 引用"
+        r = client.get(m.group(1))
+        assert r.status_code == 200
+        assert "cache-control" not in r.headers
+
+    def test_health_has_no_cache_control(self, client):
+        # no-cache 只针对入口页,普通 API 响应不带这个头
+        r = client.get("/health", params={"force": 1})
+        assert r.status_code == 200
+        assert "cache-control" not in r.headers
+
     def test_health_degraded_without_session(self, client):
         # 空会话时 validate 走"无鉴权 Cookie 直接 False"分支,零网络
         r = client.get("/health", params={"force": 1})
@@ -197,3 +226,160 @@ class TestRoutes:
         r = client.get("/sign/status")
         assert r.status_code == 200
         assert r.json()["live"] is None
+
+    def test_upstream_exception_returns_502_not_500(self, client, monkeypatch):
+        # 回归:except upstream_lib.RequestException 曾引用未导入的名字,
+        # 上游断连时异常兜底自身抛 NameError → 500。必须回结构化 502。
+        def boom(*args, **kwargs):
+            raise requests.ConnectionError("simulated upstream outage")
+
+        monkeypatch.setattr(sdgun_proxy.upstream, "request", boom)
+        r = client.get("/mag/index/v1/Index/jsApi")
+        assert r.status_code == 502
+        assert r.json()["proxy_error"].startswith("ConnectionError")
+
+    def test_auth_login_rejects_empty_fields(self, client):
+        # 空账号/密码必须在代理层拦下(上游失败 3 次会临时锁定,不能白耗计数)
+        r = client.post("/auth/login", json={"account": "  ", "password": ""})
+        assert r.status_code == 400
+        assert "不能为空" in r.json()["msg"]
+
+    def test_auth_login_rejects_non_json_body(self, client):
+        r = client.post("/auth/login", content=b"not json",
+                        headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+
+
+# ============================ /proxy 流式与 /link 跳桥 ============================
+
+class _FakeStreamResp:
+    """流式上游响应替身:forward() 只用到 headers/iter_content/close/status_code。"""
+
+    def __init__(self, headers: dict, chunks: list[bytes]):
+        from requests.structures import CaseInsensitiveDict
+        self.headers = CaseInsensitiveDict(headers)
+        self.status_code = 200
+        self._chunks = chunks
+
+    def iter_content(self, chunk_size=64 * 1024):
+        yield from self._chunks
+
+    def close(self):
+        pass
+
+
+class _FakeUpstream:
+    """按序吐出预设响应的上游替身(/link 的多跳场景)。"""
+
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        return self._responses.pop(0)
+
+
+def _buffered_resp(status=200, headers=None, body=b"") -> requests.Response:
+    r = requests.Response()
+    r.status_code = status
+    r._content = body
+    for k, v in (headers or {}).items():
+        r.headers[k] = v
+    return r
+
+
+class TestProxyStreaming:
+    """/proxy 媒体流式路径(回归:chunked 上游缺 content-length 时曾 KeyError→500)。"""
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def test_chunked_media_without_content_length_streams(self, client, monkeypatch):
+        # chunked(无 content-length、无 content-encoding)的媒体响应必须按块透传,
+        # 而不是在下标取 content-length 时裸奔成 500
+        fake = _FakeStreamResp(
+            headers={"Content-Type": "video/mp4"},   # 无 Content-Length / Content-Encoding
+            chunks=[b"ABCD", b"EFGH"],
+        )
+        monkeypatch.setattr(sdgun_proxy.upstream, "request", lambda *a, **k: fake)
+        r = client.get("/proxy", params={"url": "http://picapp.sdgun.net/video/x.mp4"})
+        assert r.status_code == 200
+        assert r.content == b"ABCDEFGH"
+
+    def test_media_with_content_length_keeps_header(self, client, monkeypatch):
+        fake = _FakeStreamResp(
+            headers={"Content-Type": "video/mp4", "Content-Length": "8"},
+            chunks=[b"ABCD", b"EFGH"],
+        )
+        monkeypatch.setattr(sdgun_proxy.upstream, "request", lambda *a, **k: fake)
+        r = client.get("/proxy", params={"url": "http://picapp.sdgun.net/video/x.mp4"})
+        assert r.status_code == 200
+        assert r.headers["content-length"] == "8"
+        assert r.content == b"ABCDEFGH"
+
+    def test_stream_range_header_passthrough(self, client, monkeypatch):
+        # <video> 起播/拖进度条依赖 Range 透传(206 + Content-Range 原样回传)
+        fake = _FakeStreamResp(
+            headers={"Content-Type": "video/mp4", "Content-Length": "4",
+                     "Content-Range": "bytes 0-3/1024"},
+            chunks=[b"ABCD"],
+        )
+        fake.status_code = 206
+        seen = {}
+
+        def capture(method, url, **kwargs):
+            seen.update(kwargs.get("headers") or {})
+            return fake
+
+        monkeypatch.setattr(sdgun_proxy.upstream, "request", capture)
+        r = client.get("/proxy", params={"url": "http://picapp.sdgun.net/video/x.mp4"},
+                       headers={"Range": "bytes=0-3"})
+        assert r.status_code == 206
+        assert seen.get("Range") == "bytes=0-3"
+        assert r.headers["content-range"] == "bytes 0-3/1024"
+
+
+class TestLinkBridge:
+    """/link 跳桥:同主机重定向服务端跟随,跨主机透传 Location 给浏览器。"""
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def test_cross_host_redirect_passthrough(self, client, monkeypatch):
+        # e.tb.cn http→https 属同主机(服务端继续跟),跳到其它主机则 302 交给浏览器
+        fake = _FakeUpstream([
+            _buffered_resp(301, {"Location": "https://e.tb.cn/x"}, b""),
+            _buffered_resp(302, {"Location": "https://item.taobao.com/item.htm"}, b""),
+        ])
+        monkeypatch.setattr(sdgun_proxy, "upstream_client", fake)
+        # follow_redirects=False:否则 TestClient 会替浏览器跟到外网真实地址
+        r = client.get("/link", params={"url": "http://e.tb.cn/abc"}, follow_redirects=False)
+        assert r.status_code == 302
+        assert r.headers["location"] == "https://item.taobao.com/item.htm"
+
+    def test_same_host_followed_to_200(self, client, monkeypatch):
+        fake = _FakeUpstream([
+            _buffered_resp(301, {"Location": "https://e.tb.cn/x"}, b""),
+            _buffered_resp(200, {}, b"<html>ok</html>"),
+        ])
+        monkeypatch.setattr(sdgun_proxy, "upstream_client", fake)
+        r = client.get("/link", params={"url": "http://e.tb.cn/abc"})
+        assert r.status_code == 200
+        assert b"ok" in r.content
+
+    def test_redirect_loop_terminates_at_5_hops(self, client, monkeypatch):
+        # 始终同主机 302:跟满 5 跳后原样返回,不能死循环
+        fake = _FakeUpstream([
+            _buffered_resp(302, {"Location": f"https://e.tb.cn/hop{i}"}, b"")
+            for i in range(6)
+        ])
+        monkeypatch.setattr(sdgun_proxy, "upstream_client", fake)
+        r = client.get("/link", params={"url": "http://e.tb.cn/abc"}, follow_redirects=False)
+        assert r.status_code == 302   # 收敛返回,不是异常/死循环
+
+    def test_rejects_non_http_scheme(self, client):
+        r = client.get("/link", params={"url": "ftp://example.com/x"})
+        assert r.status_code == 400

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Avatar, Button, Card, Empty, Image, Input, Pagination, Popconfirm, Space, Spin, Tag, Typography, message } from 'antd';
 import { pickData, ApiError } from '../api/client';
 import { sdgunApi } from '../api/sdgun';
-import { prepareCommentHtml, proxiedImage, threadTid, extractThreadRow, enhanceVideos } from '../utils/media';
+import { proxiedImage, threadTid, extractThreadRow, enhanceVideos, renderRichText } from '../utils/media';
 import type { CommentItem, InfoFeedItem, RewardContent, RewardRecordItem, ThreadRowData } from '../types/sdgun-api-types';
 
 const C_STEP = 10;
@@ -34,8 +34,12 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
   /** 评论输入框 */
   const [commentText, setCommentText] = useState('');
   const [commentSubmitting, setCommentSubmitting] = useState(false);
+  /** 定向回复目标(点某条评论的「回复」;null = 普通评论) */
+  const [replyTarget, setReplyTarget] = useState<{ id: string; user_name: string } | null>(null);
   const [liked, setLiked] = useState(false);
   const [liking, setLiking] = useState(false);
+  const [faved, setFaved] = useState(false);   // 本地收藏标记(sdgun_favorites)
+  const [faving, setFaving] = useState(false);
   const [followed, setFollowed] = useState(false);
   const [following, setFollowing] = useState(false);
   /** 正文容器引用:渲染后对 <video> 做尺寸自适应与 HEVC 提示(enhanceVideos) */
@@ -72,13 +76,17 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
     setCTotal(0);
     setLiked(false);
     setFollowed(false);
+    setFaved(false);
     setContentHtml('');
     setContentError(false);
     setAuthor(null);
     setCircleId('');
     setCommentText('');
+    setReplyTarget(null);   // 换帖后不能沿用上一篇的回复目标
     if (item) {
       const tid = threadTid(item);
+      // 本地收藏状态(毫秒级接口,失败静默按未收藏处理)
+      sdgunApi.favoritesHas(tid).then((r) => setFaved(Boolean(r.has))).catch(() => {});
       void loadComments(tid, 1);
       setContentLoading(true);
       sdgunApi
@@ -91,7 +99,7 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
             return;
           }
           const row: ThreadRowData | null = extractThreadRow(html);
-          setContentHtml(prepareCommentHtml(row?.content ?? ''));
+          setContentHtml(renderRichText(row?.content ?? ''));
           if (row?.user_id) {
             setAuthor({
               id: String(row.user_id),
@@ -106,14 +114,18 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
     }
   }, [item, loadComments]);
 
-  /** 发表评论（成功后回到第 1 页刷新，新评论在最前） */
+  /** 发表评论/定向回复(成功后回到第 1 页刷新,新评论在最前) */
   const doComment = async () => {
     if (!item || !commentText.trim()) return;
     setCommentSubmitting(true);
     try {
-      const resp = await sdgunApi.addComment(threadTid(item), commentText.trim(), circleId);
+      // replyTarget 非空时带上 reply_id:上游把回复与主评论平铺在同一个 list 里,
+      // 回复项会带 to_comment 引用(见 API-ANALYSIS 附录 12)
+      const resp = await sdgunApi.addComment(threadTid(item), commentText.trim(), circleId,
+                                            replyTarget?.id);
       message.success(resp.data?.message_result === 'post_reply_succeed' ? '评论发表成功' : '评论已提交');
       setCommentText('');
+      setReplyTarget(null);
       setCPage(1);
       void loadComments(threadTid(item), 1);
     } catch (e) {
@@ -148,10 +160,34 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       const resp = await sdgunApi.applaudContent(threadTid(item));
       setLiked(true);
       message.success(resp.code === 100 ? '点赞成功' : '该帖子已点赞过');
+      // 本地归档(上游无"我的点赞"接口;失败静默,不影响点赞本身)
+      sdgunApi.likesAdd(threadTid(item), item.title ?? '').catch(() => {});
     } catch (e) {
       message.error(`点赞失败：${(e as ApiError).message}`);
     } finally {
       setLiking(false);
+    }
+  };
+
+  /** 收藏/取消收藏(本地标记;上游收藏接口未逆向,见 sdgun_favorites.py) */
+  const doFavorite = async () => {
+    if (!item) return;
+    const tid = threadTid(item);
+    setFaving(true);
+    try {
+      if (faved) {
+        await sdgunApi.favoritesRemove(tid);
+        setFaved(false);
+        message.success('已取消收藏');
+      } else {
+        await sdgunApi.favoritesAdd(tid, item.title ?? '');
+        setFaved(true);
+        message.success('已收藏（在我的主页「收藏」tab 查看）');
+      }
+    } catch (e) {
+      message.error(`收藏操作失败：${(e as ApiError).message}`);
+    } finally {
+      setFaving(false);
     }
   };
 
@@ -238,6 +274,15 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
             {liked ? '已点赞' : '点赞'}
           </Button>
         </Popconfirm>
+        <Button
+          size="small"
+          type={faved ? 'primary' : 'default'}
+          ghost={faved}
+          loading={faving}
+          onClick={() => void doFavorite()}
+        >
+          {faved ? '★ 已收藏' : '☆ 收藏'}
+        </Button>
         <Popconfirm
           title={`关注作者 ${author?.name ?? item.user_name ?? ''}？`}
           onConfirm={() => void doFollowAuthor()}
@@ -317,19 +362,22 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       </Typography.Title>
 
       {/* 发表评论（真实写操作，发出后所有人可见） */}
+      {replyTarget && (
+        <div style={{ marginBottom: 6 }}>
+          <Tag color="blue" closable onClose={() => setReplyTarget(null)}>
+            回复 @{replyTarget.user_name}
+          </Tag>
+        </div>
+      )}
       <Space.Compact style={{ width: '100%', marginBottom: 12 }}>
         <Input.TextArea
           value={commentText}
           onChange={(e) => setCommentText(e.target.value)}
-          placeholder={item ? `评论「${(item.title ?? '').slice(0, 18)}…」（Enter 发送）` : '评论内容'}
+          placeholder={replyTarget
+            ? `回复 @${replyTarget.user_name}`
+            : (item ? `评论「${(item.title ?? '').slice(0, 18)}…」` : '评论内容')}
           autoSize={{ minRows: 1, maxRows: 4 }}
           maxLength={1000}
-          onPressEnter={(e) => {
-            if (!e.shiftKey) {
-              e.preventDefault();
-              void doComment();
-            }
-          }}
         />
       </Space.Compact>
       <Button
@@ -372,15 +420,50 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>IP {c.ip_address}</Typography.Text>
                 )}
                 <Typography.Text type="secondary">👍 {c.applaud_count}</Typography.Text>
+                <Button
+                  size="small"
+                  type={replyTarget?.id === c.id ? 'primary' : 'text'}
+                  onClick={() => setReplyTarget({ id: c.id, user_name: c.user_name })}
+                >
+                  回复
+                </Button>
               </Space>
+              {/* 楼中楼的引用块:被回复评论的原文(@昵称 + 消毒后的富文本),样式仿 WAP comment-feed */}
+              {c.to_comment?.id && (
+                <div
+                  style={{
+                    marginTop: 6,
+                    padding: '6px 10px',
+                    background: '#f5f5f5',
+                    borderLeft: '3px solid #d9d9d9',
+                    borderRadius: 4,
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    @{c.to_comment.user_name}
+                  </Typography.Text>
+                  {/*
+                    引用内容同样来自社区用户:renderRichText 内部已是
+                    prepareCommentHtml → sanitizeHtml(DOMPurify),不能直出。
+                  */}
+                  <div
+                    className="comment-content"
+                    style={{ marginTop: 2 }}
+                    dangerouslySetInnerHTML={{ __html: renderRichText(c.to_comment.content ?? '') }}
+                  />
+                </div>
+              )}
               {/*
-                评论为论坛富文本 HTML（含 <img>/<br>）。
-                注意：内容来自社区用户，公网部署前需接入 DOMPurify 等做 XSS 消毒。
+                评论为论坛富文本 HTML（含 <img>/<br>），renderRichText 已在改写后
+                过 DOMPurify 消毒——内容来自社区用户，这道闸在任何部署形态都不能省。
               */}
               <div
                 className="comment-content"
                 style={{ marginTop: 6, lineHeight: 1.7, wordBreak: 'break-word' }}
-                dangerouslySetInnerHTML={{ __html: prepareCommentHtml(c.content) }}
+                dangerouslySetInnerHTML={{ __html: renderRichText(c.content) }}
               />
               {(c.pics?.length ?? 0) > 0 && (
                 <Space wrap style={{ marginTop: 6 }}>

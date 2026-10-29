@@ -19,6 +19,7 @@ import glob
 import json
 import logging
 import os
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -58,6 +59,14 @@ APP_HEADERS = {
 
 AUTH_COOKIE_NAME = "3df5d0fc98d8c119af2e389a3f45b5b0"   # 固定名的鉴权 Cookie
 
+# 上游超时 (connect, read)。connect=5s 是 2026-09-09 VPS「加载慢」事故的结论:
+# 直连路径偶发丢 SYN,内核默认要重试 ~15s,把一次抖动放大成 15s+ 卡顿(实测
+# 30 连发 29 次 <0.5s、1 次 15.5s)。在连接级重试存在的前提下,connect 快速
+# 失败 + 重新解析 DNS 重连是最优组合(单次抖动 ~6s 内恢复)。read 保持宽松
+# (慢页面/媒体流分块)。历史:08-29 曾因 connect=10s 且无重试而整页报错回调
+# 到 15s——那是重试缺失的年代,现在有了 Retry 兜底,缩短 connect 只收敛尾延迟。
+UPSTREAM_TIMEOUT = (5, 30)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 抓包/会话数据目录(Docker 部署时挂载宿主机目录,更新会话无需重建镜像)
 DATA_DIR = os.environ.get("SDGUN_DATA_DIR", BASE_DIR)
@@ -65,6 +74,29 @@ DATA_DIR = os.environ.get("SDGUN_DATA_DIR", BASE_DIR)
 
 def _cookie_header_of(jar: dict) -> str:
     return "; ".join(f"{k}={v}" for k, v in jar.items())
+
+
+def atomic_write_json(path: str, payload: object) -> None:
+    """原子写 JSON(同目录临时文件 + os.replace)。
+
+    会话存储与消息归档共用:直接 open(w) 覆盖在并发落盘时可能交错写坏文件,
+    坏文件的症状是"莫名登录信息已过期"式的静默失效,极难追溯。tmp 名由
+    mkstemp 保证唯一,并发调用互不覆盖;os.replace 在同一文件系统上原子生效。
+    写失败时清理残留 tmp 并重新抛出,由调用方决定告警方式。
+    """
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def make_upstream_session() -> upstream_lib.Session:
@@ -148,9 +180,7 @@ class SessionStore:
 
     def persist(self) -> None:
         try:
-            os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump({"cookies": self.snapshot()}, f, ensure_ascii=False)
+            atomic_write_json(self.session_file, {"cookies": self.snapshot()})
         except OSError as exc:
             # 卷只读/磁盘满时不能静默:会话吸收会悄悄失效,症状(莫名"登录信息已过期"
             # 循环)极难从表面定位,必须留痕
@@ -166,7 +196,7 @@ class SessionStore:
             r = upstream_client.get(
                 MAIN_ORIGIN + "/mag/index/v1/Index/jsApi",
                 headers=dict(APP_HEADERS, Cookie=_cookie_header_of(jar)),
-                timeout=(15, 20),
+                timeout=UPSTREAM_TIMEOUT,
             )
             return bool(r.json().get("_USER"))
         except Exception:  # noqa: BLE001 —— 校验失败一律视为无效

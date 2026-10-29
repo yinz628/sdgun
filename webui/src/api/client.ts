@@ -48,7 +48,16 @@ api.interceptors.response.use(
     }
     return resp;
   },
-  (error: AxiosError<{ proxy_error?: string; msg?: string }>) => {
+  async (error: AxiosError<{ proxy_error?: string; msg?: string }>) => {
+    // GET 幂等:上游直连偶发丢包耗尽代理重试后表现为 502/网络错误/超时——
+    // 静默重试一次即可消除大部分"偶发加载失败"的体感;POST(评论/私信/点赞等
+    // 真实写操作)绝不重试,避免重复提交
+    const cfg = error.config as (InternalAxiosRequestConfig & { __retried?: boolean }) | undefined;
+    if (cfg && cfg.method === 'get' && !cfg.__retried) {
+      cfg.__retried = true;
+      await new Promise((r) => setTimeout(r, 800));
+      return api.request(cfg);
+    }
     const detail = error.response?.data?.proxy_error ?? error.response?.data?.msg ?? error.message;
     return Promise.reject(new ApiError(String(detail), error.response?.status));
   },

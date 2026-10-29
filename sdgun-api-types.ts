@@ -523,7 +523,7 @@ export type RewardRecordResponse = ApiListResponse<RewardRecordItem>;
 /* ============ 通知 / 圈子树（来自第二份抓包） ============ */
 
 /** GET /mag/user/v3/UserNotify/notifyList?code=at|focus|applaud|comment|chat */
-export type NotifyListResponse = ApiListResponse<Record<string, unknown>>;
+export type NotifyListResponse = ApiListResponse<NotifyItem>;
 
 export interface CircleNode {
   id: number;
@@ -572,6 +572,18 @@ export interface CommentItem {
   ip_address?: string;
   pics: string[]; // 评论图（可能重复）
   content: string; // HTML 富文本
+  /**
+   * 被回复评论的引用(楼中楼):replyAdd 带 reply_id 产生的回复会带上它。
+   * 回复与主评论平铺在同一个 list 里;无引用时上游给 [] 或 null。
+   */
+  to_comment?: {
+    id: string;
+    user_id?: string;
+    user_name: string;
+    content: string; // HTML 富文本(原评论正文)
+    time?: string;
+    floor?: string | number;
+  } | null;
   [key: string]: unknown; // 楼层时间/回复结构样本未展开
 }
 
@@ -679,6 +691,110 @@ export interface UserHomeData {
   is_app_user: boolean;
   sharedata: { title: string; des: string; linkurl: string; picurl: string };
   [key: string]: unknown;
+}
+
+/** 帖子收藏(sdgun_favorites.py;上游收藏接口未逆向,当前为网页端本地标记,可增删) */
+export interface FavoriteRecord {
+  tid: number;
+  title: string;
+  added_at: number; // unix 秒
+}
+
+export interface FavoritesListResponse {
+  favorites: FavoriteRecord[];
+  total: number;
+}
+
+/** 点赞本地归档(sdgun_likes.py;上游无"我的点赞"接口,网页端点赞自行落盘) */
+export interface LikeRecord {
+  tid: number;
+  title: string;
+  liked_at: number; // unix 秒
+}
+
+export interface LikesListResponse {
+  likes: LikeRecord[];
+  total: number;
+}
+
+/** 关注关键字监控(sdgun_watch.py):代理侧守护线程轮询信息流,标题命中规则即记录 */
+export interface WatchRule {
+  id: number;
+  name: string; // 可空,展示时回落到 keywords 拼串
+  keywords: string[]; // 规则内需全部命中(AND)
+  enabled: boolean;
+  created_at: number; // unix 秒
+}
+
+export interface WatchHit {
+  hit_id: number; // 单调递增,前端游标(sdgunWatchSeen)用它
+  tid: number; // 帖子 tid(优先取条目 type_value)
+  content_id: number; // 信息流条目 id(去重口径)
+  publish_time: number; // 发帖时间(unix 秒);0 = 上游未给(旧记录无此字段,前端回退 created_at)
+  title: string;
+  user_name: string;
+  publish_time_str: string; // 上游相对时间文案,如 "1小时前"
+  forum_name?: string;
+  keywords: string[]; // 命中的关键字(多规则去重后的并集)
+  rule_ids: number[];
+  created_at: number; // unix 秒
+}
+
+export interface WatchRulesResponse {
+  rules: WatchRule[];
+}
+
+export interface WatchHitsResponse {
+  hits: WatchHit[];
+  max_hit_id: number;
+  total: number;
+}
+
+/** GET /watch/status(监控线程状态;source 为 null 表示尚未解析出监控源) */
+export interface WatchStatus {
+  enabled: boolean;
+  interval: number; // 轮询间隔秒
+  /** 监控源:版块(fid)或频道分类(channel_id+cat_id)两种形态,由部署/自动解析决定 */
+  source: {
+    channel_id?: number;
+    cat_id?: number;
+    fid?: number;
+    channel_name?: string; // 频道名(自动解析时来自栏目)
+    forum_name?: string; // 版块名(env 指定 fid 时为空,前端回落到「版块 fid N」)
+  } | null;
+  rule_count: number;
+  hit_count: number;
+  polls: number;
+  last_ok_at: number; // unix 秒,0 = 尚未成功
+  last_error: string | null;
+  last_error_at: number;
+  window_hours: number; // 提醒时间窗(12/24/48):只提醒发布时间在 N 小时内的帖子
+}
+
+/** GET/POST /watch/settings(目前只有提醒时间窗) */
+export interface WatchSettingsResponse {
+  window_hours: number;
+}
+
+/** GET /mag/user/v1/UserNotify/MyFollowsList?user_id&p&step 的 list 项（我关注的人）
+ *  08-25-2 抓包实测：name/head 为明文，user_id 即对端 uid；无 total 字段，
+ *  "返回条数 < step" 即到末页 */
+export interface MyFollowItem {
+  id: number;
+  user_id: number;
+  friend_id: number; // = 自己的 uid
+  name: string;
+  head: string;
+  sex: string;
+  group_ico_src: string;
+  is_vip: number;
+}
+
+export interface MyFollowsListResponse {
+  success: boolean;
+  code: number;
+  msg: string | null;
+  list?: MyFollowItem[];
 }
 
 /** userHome 顶层的 tab 配置（资料/动态/论坛/圈子，含各 tab 数据链接） */
@@ -845,3 +961,52 @@ export interface ReplyAddResponse extends ApiEnvelope {
     delete_url?: string; // /mag/circle/v1/forum/postdelete?tid=&pid=
   };
 }
+
+/* ===== 通知与会话列表(2026-09-10) ===== */
+
+/** 本地归档会话摘要(/messages/conversations,代理侧按对端分组) */
+export interface ConversationSummary {
+  peer_id: string; // user<uid>
+  name: string; // 对端昵称(来自来信 ext.user_name,可能为空)
+  last_text: string; // 最后一条消息摘录(content JSON 已解析出 text)
+  last_time: number; // 最后一条消息时间(epoch 秒)
+  last_from_me: boolean; // 最后一条是否我发出的
+  count: number; // 双向消息总条数(本地归档口径)
+}
+
+export interface ConversationsResponse {
+  conversations: ConversationSummary[];
+}
+
+/** 通知中心索引条目(/mag/user/v3/userNotify/userNotifyIndex) */
+export interface NotifyIndexItem {
+  code: 'at' | 'focus' | 'applaud' | 'comment' | 'chat';
+  count: number;
+  content: string; // 预览文案,如 "FQY625 回复了您的帖子   查看"
+  create_time: number | string; // epoch 秒;空串表示该分类无通知
+  create_time_str: string; // "09-07"
+}
+
+export interface NotifyIndexResponse {
+  success: boolean;
+  code: number;
+  msg: string | null;
+  data: { notifyList: NotifyIndexItem[]; [k: string]: unknown };
+}
+
+/** 通知明细条目(/mag/user/v3/UserNotify/notifyList?code=) */
+export interface NotifyItem {
+  id: string;
+  head: string;
+  content: string; // "FQY625 回复了您的帖子"
+  quote: string;
+  title: string; // 相关帖子标题
+  pic: string;
+  create_time: string; // epoch 秒字符串
+  from_user_id: string; // 0(上游不回填)
+  link: string; // 站内路径,含 tid/reply_id/nid 查询参数
+  video_url: string;
+  from_num: string;
+  from_num_str: string;
+}
+

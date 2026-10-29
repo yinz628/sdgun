@@ -1,4 +1,5 @@
 import { PROXY_BASE } from '../api/client';
+import { sanitizeHtml } from './sanitize';
 import type { InfoFeedItem, ThreadRowData } from '../types/sdgun-api-types';
 
 /**
@@ -82,6 +83,12 @@ export function prepareCommentHtml(html: string): string {
     return next;
   });
   return out;
+}
+
+/** 富文本渲染管线:先做代理改写,再过 DOMPurify 消毒(最后一道闸,兜住一切漏网内容)。
+ *  所有进入 dangerouslySetInnerHTML 的上游帖子/评论 HTML 都应经此函数。 */
+export function renderRichText(html: string): string {
+  return sanitizeHtml(prepareCommentHtml(html));
 }
 
 /** 信息流条目 → 真实帖子 tid：link 的 tid= 最权威，回退 type_value（type=2 帖子时），最后 id */
