@@ -8,6 +8,7 @@ import {
   tidFromNotifyLink,
 } from '../utils/notify';
 import { toastErr } from '../utils/toast';
+import { tokenHeader } from '../utils/token';
 import type { ConversationSummary, JsApiUser, NotifyIndexItem, NotifyItem, WatchHit, WatchRule, WatchStatus } from '../types/sdgun-api-types';
 
 /** 提醒时间窗选项(与后端 WINDOW_HOURS_CHOICES 一致) */
@@ -124,7 +125,10 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
   const replayLogin = async () => {
     setReplaying(true);
     try {
-      const resp = await fetch(`${PROXY_BASE}/auth/replay-exact`, { method: 'POST' });
+      const resp = await fetch(`${PROXY_BASE}/auth/replay-exact`, {
+        method: 'POST',
+        headers: tokenHeader(),   // 代理启用访问令牌门禁时必需
+      });
       const j = await resp.json();
       if (j.session_updated) {
         message.success('登录成功，已获取新会话');
@@ -148,7 +152,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
     const post = () =>
       fetch(`${PROXY_BASE}/auth/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...tokenHeader() },
         body: JSON.stringify(values),
       });
     try {

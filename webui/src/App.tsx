@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Layout, notification } from 'antd';
+import { Input, Layout, Modal, notification } from 'antd';
 import UserBar from './components/UserBar';
 import FeedList from './components/FeedList';
 import ThreadPanel from './components/ThreadPanel';
@@ -10,6 +10,7 @@ import {
   NOTIFY_LABEL, fmtEpochSec, isWatchTidRead, migrateWatchReadFromHitIds, tidFromNotifyLink,
 } from './utils/notify';
 import { chatMsgExcerpt } from './utils/chat';
+import { setToken, TOKEN_REQUIRED_EVENT, tokenEvents } from './utils/token';
 import type { InfoFeedItem, JsApiUser } from './types/sdgun-api-types';
 
 const { Header, Sider, Content } = Layout;
@@ -258,8 +259,25 @@ export default function App() {
   const [selected, setSelected] = useState<InfoFeedItem | null>(null);
   const [userView, setUserView] = useState<UserView | null>(null);
   const [unread, setUnread] = useState(0);
+  const [tokenPrompt, setTokenPrompt] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState('');
   const userViewRef = useRef<UserView | null>(null);
   userViewRef.current = userView;
+
+  /** 代理访问令牌门禁:任一带业务请求收到门禁 401(api/client 派发事件)即弹窗。
+   *  保存后整页 reload,让所有初始请求带上新令牌重放——最简可靠,不做请求级重试。 */
+  useEffect(() => {
+    const onTokenRequired = () => setTokenPrompt(true);
+    tokenEvents.addEventListener(TOKEN_REQUIRED_EVENT, onTokenRequired);
+    return () => tokenEvents.removeEventListener(TOKEN_REQUIRED_EVENT, onTokenRequired);
+  }, []);
+
+  const submitToken = () => {
+    const v = tokenDraft.trim();
+    if (!v) return;
+    setToken(v);
+    window.location.reload();
+  };
 
   const { unseen: notifyUnseen, markRead: markNotifyRead } = useNotifyWatcher(user);
 
@@ -288,54 +306,81 @@ export default function App() {
   const { unseen: watchUnseen, refreshUnseen: refreshWatchUnseen } = useWatchHits(openWatchThread);
 
   return (
-    <Layout style={{ height: '100vh' }}>
-      <Header
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          background: '#001529',
-          paddingInline: 24,
-        }}
-      >
-        <UserBar
-          onUserChange={setUser}
-          unread={unread}
-          onClearUnread={() => setUnread(0)}
-          notifyUnseen={notifyUnseen}
-          onNotifyRead={markNotifyRead}
-          onOpenConversation={openUser}
-          onOpenNotifyThread={openThreadFromNotify}
-          watchUnseen={watchUnseen}
-          onWatchRefresh={refreshWatchUnseen}
-          onOpenWatchThread={openWatchThread}
-        />
-      </Header>
+    <>
+      <Layout style={{ height: '100vh' }}>
+        <Header
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            background: '#001529',
+            paddingInline: 24,
+          }}
+        >
+          <UserBar
+            onUserChange={setUser}
+            unread={unread}
+            onClearUnread={() => setUnread(0)}
+            notifyUnseen={notifyUnseen}
+            onNotifyRead={markNotifyRead}
+            onOpenConversation={openUser}
+            onOpenNotifyThread={openThreadFromNotify}
+            watchUnseen={watchUnseen}
+            onWatchRefresh={refreshWatchUnseen}
+            onOpenWatchThread={openWatchThread}
+          />
+        </Header>
 
-      <Layout>
-        <Sider width={480} theme="light" style={{ padding: 12, overflow: 'auto' }}>
-          <FeedList selectedId={selected?.id} onSelect={setSelected} onOpenUser={openUser} />
-        </Sider>
+        <Layout>
+          <Sider width={480} theme="light" style={{ padding: 12, overflow: 'auto' }}>
+            <FeedList selectedId={selected?.id} onSelect={setSelected} onOpenUser={openUser} />
+          </Sider>
 
-        <Content style={{ padding: 12, overflow: 'auto' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: '100%' }}>
-            {userView ? (
-              <UserPanel
-                userId={userView.userId}
-                nameHint={userView.name}
-                autoOpenChat={userView.openChat}
-                me={user ? { user_id: user.user_id, name: user.name, head: user.head } : null}
-                onClose={() => setUserView(null)}
-                onOpenUser={openUser}
-                onOpenThread={(item) => { setSelected(item); setUserView(null); }}
-              />
-            ) : (
-              <ThreadPanel item={selected} onOpenUser={openUser} />
-            )}
-            <OpsForms user={user} />
-          </div>
-        </Content>
+          <Content style={{ padding: 12, overflow: 'auto' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: '100%' }}>
+              {userView ? (
+                <UserPanel
+                  userId={userView.userId}
+                  nameHint={userView.name}
+                  autoOpenChat={userView.openChat}
+                  me={user ? { user_id: user.user_id, name: user.name, head: user.head } : null}
+                  onClose={() => setUserView(null)}
+                  onOpenUser={openUser}
+                  onOpenThread={(item) => { setSelected(item); setUserView(null); }}
+                />
+              ) : (
+                <ThreadPanel item={selected} onOpenUser={openUser} />
+              )}
+              <OpsForms user={user} />
+            </div>
+          </Content>
+        </Layout>
       </Layout>
 
-    </Layout>
+      <Modal
+        open={tokenPrompt}
+        title="需要代理访问令牌"
+        okText="保存并重新加载"
+        cancelText="稍后"
+        okButtonProps={{ disabled: !tokenDraft.trim() }}
+        onOk={submitToken}
+        onCancel={() => setTokenPrompt(false)}
+      >
+        <p style={{ marginTop: 0 }}>
+          代理已启用访问令牌门禁（部署端设置了 <code>SDGUN_ACCESS_TOKEN</code>），
+          请输入部署时配置的访问令牌。
+        </p>
+        <p style={{ color: '#888', marginBottom: 8 }}>
+          这是<strong>代理访问令牌</strong>（用于放行本代理），不是论坛账号密码，
+          也不是论坛登录态（Cookie）。
+        </p>
+        <Input.Password
+          autoFocus
+          placeholder="访问令牌"
+          value={tokenDraft}
+          onChange={(e) => setTokenDraft(e.target.value)}
+          onPressEnter={submitToken}
+        />
+      </Modal>
+    </>
   );
 }

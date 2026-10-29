@@ -1,10 +1,13 @@
 import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
+import { emitTokenRequired, getToken, TOKEN_REQUIRED_MSG } from '../utils/token';
 
 /**
  * Axios 封装：
  *  - baseURL 指向本地 CORS 代理（sdgun_proxy.py），App 身份头（UA/mag-version 等）由代理注入
  *  - 请求拦截器：带上 X-Sdgun-Cookie（前端自管会话；为空时代理用兜底会话）
- *  - 响应拦截器：统一解包 {success, code, msg}，success !== true 抛 ApiError
+ *                 与 X-Sdgun-Token（代理启用访问令牌门禁时）
+ *  - 响应拦截器：统一解包 {success, code, msg}，success !== true 抛 ApiError；
+ *                 门禁 401 触发全局令牌缺失事件（App 弹窗输入）
  */
 
 export class ApiError extends Error {
@@ -33,6 +36,8 @@ export const api = axios.create({
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const cookie = localStorage.getItem('sdgunCookies');
   if (cookie) config.headers['X-Sdgun-Cookie'] = cookie;
+  const token = getToken();
+  if (token) config.headers['X-Sdgun-Token'] = token;
   return config;
 });
 
@@ -49,6 +54,12 @@ api.interceptors.response.use(
     return resp;
   },
   async (error: AxiosError<{ proxy_error?: string; msg?: string }>) => {
+    // 代理访问令牌门禁:401 + 固定文案 → 派发全局事件让 App 弹窗输入令牌。
+    // 必须先于 GET 重试判断,否则会白等 800ms 且重试注定失败。
+    if (error.response?.status === 401 && error.response.data?.msg === TOKEN_REQUIRED_MSG) {
+      emitTokenRequired();
+      return Promise.reject(new ApiError(TOKEN_REQUIRED_MSG, 401));
+    }
     // GET 幂等:上游直连偶发丢包耗尽代理重试后表现为 502/网络错误/超时——
     // 静默重试一次即可消除大部分"偶发加载失败"的体感;POST(评论/私信/点赞等
     // 真实写操作)绝不重试,避免重复提交
