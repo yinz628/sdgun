@@ -580,23 +580,78 @@ async def auth_login(request: Request):
     return JSONResponse({"success": True, "user": safe_user, "session_updated": True})
 
 
+# 路由说明(人类注释,与事实来源分离):键为精确路径,或以 "/" 结尾的前缀。
+# 动态清单才是路由的事实来源(直接读 app.routes,永不漂移);本字典只负责给
+# 关键路由补一段中文说明——匹配不到就不附 "note",说明缺失绝不阻塞清单生成。
+_ROUTE_NOTES = {
+    "/mag/": "主站 API/WAP 转发 → mag1.sdgun.net(HTML 图片自动改写);"
+             "threadViewPage 带 sdgun_parsed=1 时返回解析信封 {parsed_row, html}",
+    "/core/": "主站 API 转发 → mag1.sdgun.net",
+    "/public/": "主站公开资源转发 → mag1.sdgun.net",
+    "/msg/": "聊天服务转发 → shuidan.chat.magcloud.net(unReadMsg 拉取即清,落本地归档)",
+    "/proxy": "通用白名单代理(picapp/bbs 图片等,跟随重定向;媒体流式透传 Range)",
+    "/link": "帖内外链跳桥:服务端 verify=False 抓取,绕开证书不匹配的短链域名",
+    "/auth/": "认证双通道:账号密码(WAP 明文表单)/ 抓包重放(含 mag-ss-key);"
+              "上游失败 3 次临时锁定,绝不自动重试",
+    "/auth/login": "账号密码登录(WAP 通道,明文表单);上游失败 msg 带锁定计数,原样透传",
+    "/auth/replay-exact": "按抓包原样重放登录(含 mag-ss-key);会话失效后的恢复入口",
+    "/sign/": "每日签到(代理侧守护线程 + /sign 路由)",
+    "/watch/": "关注关键字监控(代理侧守护线程轮询信息流,与页面是否打开无关)",
+    "/uistate": "已读状态服务器化(GET /uistate 拉取;POST /uistate/seen 上报并集)",
+    "/likes/": "本地点赞归档(上游无「我的点赞」接口)",
+    "/favorites/": "本地收藏标记(上游收藏接口未逆向)",
+    "/messages/": "本地私信归档(网页端唯一的历史来源)",
+    "/health": "会话健康探针(60s 缓存,?force=1 强制刷新;Docker HEALTHCHECK 依赖)",
+    "/proxy-info": "本端点:代理自述(动态路由清单 + 门禁状态;纯本地信息,不碰上游)",
+}
+
+
+def _route_note(path: str) -> str:
+    """按 精确路径 → 最长前缀 的顺序取中文说明;未命中返回空串(不阻塞清单生成)。"""
+    if path in _ROUTE_NOTES:
+        return _ROUTE_NOTES[path]
+    match_key = ""
+    for key in _ROUTE_NOTES:
+        if path.startswith(key) and len(key) > len(match_key):
+            match_key = key
+    return _ROUTE_NOTES.get(match_key, "")
+
+
+def _route_inventory() -> list:
+    """从 app.routes 动态生成路由清单:[{"path", "methods", "note"?}],按 path 排序。
+
+    只保留业务 APIRoute(自动过滤 FastAPI 内置的 /openapi.json 与静态挂载 Mount,
+    二者都没有业务 methods),因此输出永不与实际注册路由漂移——新增/删除路由后
+    无需改这里。同路径不同方法在 FastAPI 里是不同 route,各列一条(忠实于注册表)。
+    """
+    from fastapi.routing import APIRoute
+
+    items = []
+    for r in app.routes:
+        if not isinstance(r, APIRoute):
+            continue   # 过滤 /openapi.json(starlette Route)与静态 Mount
+        entry = {"path": r.path, "methods": sorted(r.methods)}
+        note = _route_note(r.path)
+        if note:
+            entry["note"] = note
+        items.append(entry)
+    items.sort(key=lambda x: (x["path"], x["methods"]))
+    return items
+
+
 @app.get("/proxy-info")
 async def index():
+    """代理自述:路由清单由 app.routes 动态生成(永不漂移),另附门禁/客户端信息。
+
+    Docker HEALTHCHECK 打的就是本端点,必须保持轻量:只读本地状态,不碰上游、
+    不发任何会话网络调用。auth_gate 只回 on/off,绝不回显令牌值。
+    """
     return {
         "proxy": "SDGun CORS Proxy (requests-based)",
         "session_cookie_names": list(store.snapshot().keys()),
-        "routes": {
-            "主站 API/WAP": "/mag/** /core/** /public/**  → mag1.sdgun.net(HTML 图片自动改写)",
-            "聊天服务": "/msg/**  → shuidan.chat.magcloud.net",
-            "通用白名单代理": "/proxy?url=<encoded-url>(图片等,跟随重定向)",
-            "外链跳桥": "/link?url=<encoded-url>(无 Cookie,绕开证书不匹配短链)",
-            "账号密码登录": "POST /auth/login {account, password}(WAP 通道,明文表单)",
-            "一键登录(重放)": "POST /auth/replay-exact",
-            "签到": "GET /sign/status · POST /sign/run",
-            "关注关键字监控": "GET /watch/status|hits|rules · POST /watch/rules[/remove|/toggle|/run]"
-                              "(本地监控线程,新帖标题命中关键字即提醒)",
-            "健康检查": "GET /health(60s 缓存的会话探活,?force=1 强制刷新)",
-        },
+        "routes": _route_inventory(),
+        "auth_gate": "on" if _access_token() else "off",
+        "upstream_client": "requests(locked)",
         "cookie_source": "X-Sdgun-Cookie 头 > sdgun_session.json(自动吸收 Set-Cookie)",
         "webui": "存在 webui/dist 时由本服务托管页面(http://127.0.0.1:8000/)",
     }

@@ -638,3 +638,75 @@ class TestCorsOrigins:
         r = client.options("/mag/index/v1/Index/jsApi", headers={"Origin": "https://evil.example"})
         assert r.status_code == 204
         assert "access-control-allow-origin" not in r.headers
+
+
+# ============================ /proxy-info 动态路由清单 ============================
+
+class TestProxyInfo:
+    """/proxy-info:路由清单由 app.routes 动态生成(永不漂移)+ 门禁/客户端信息。
+
+    旧实现是手写字符串表,已漏掉 /uistate、/messages/*、/likes/*、/favorites/* 等;
+    这里把"清单 == app.routes"固定下来,以后新增路由不可能再漂移。
+    """
+
+    @pytest.fixture()
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(sdgun_proxy.app)
+
+    def _routes(self, client) -> list:
+        return client.get("/proxy-info").json()["routes"]
+
+    def test_routes_generated_from_app_routes(self, client):
+        # 清单必须与 app.routes 里的业务 APIRoute 逐条一致(过滤 /openapi.json 与静态 Mount)
+        from fastapi.routing import APIRoute
+        expected = [
+            {"path": r.path, "methods": sorted(r.methods)}
+            for r in sdgun_proxy.app.routes if isinstance(r, APIRoute)
+        ]
+        expected.sort(key=lambda x: (x["path"], x["methods"]))
+        got = [{"path": r["path"], "methods": r["methods"]} for r in self._routes(client)]
+        assert len(got) == len(expected)
+        assert got == expected
+
+    def test_paths_sorted(self, client):
+        paths = [r["path"] for r in self._routes(client)]
+        assert paths == sorted(paths)
+
+    def test_uistate_present(self, client):
+        # 手写表曾漏掉的 /uistate 与 /uistate/seen 必须出现在动态清单里
+        paths = {r["path"] for r in self._routes(client)}
+        assert "/uistate" in paths
+        assert "/uistate/seen" in paths
+
+    def test_openapi_and_mount_filtered(self, client):
+        paths = {r["path"] for r in self._routes(client)}
+        assert "/openapi.json" not in paths   # FastAPI 内置,非业务路由
+        assert "/" not in paths               # 前端静态托管 Mount
+
+    def test_auth_gate_off_when_unset(self, client, monkeypatch):
+        # conftest 的 autouse 夹具已清空 SDGUN_ACCESS_TOKEN;显式再清一次固定语义
+        monkeypatch.delenv("SDGUN_ACCESS_TOKEN", raising=False)
+        assert client.get("/proxy-info").json()["auth_gate"] == "off"
+
+    def test_auth_gate_on_and_never_echoes_token(self, client, monkeypatch):
+        monkeypatch.setenv("SDGUN_ACCESS_TOKEN", "top-secret")
+        body = client.get("/proxy-info").json()
+        assert body["auth_gate"] == "on"
+        assert "top-secret" not in json.dumps(body)   # 只回 on/off,绝不回显令牌值
+
+    def test_upstream_client_locked(self, client):
+        assert client.get("/proxy-info").json()["upstream_client"] == "requests(locked)"
+
+    def test_notes_attached_for_known_routes(self, client):
+        # 人类说明按前缀/路径匹配;命中的路由带 note,缺失也不阻塞清单
+        routes = {r["path"]: r for r in self._routes(client)}
+        assert "白名单" in routes["/proxy"]["note"]
+        assert "已读" in routes["/uistate"]["note"]
+        assert "已读" in routes["/uistate/seen"]["note"]     # 前缀命中 /uistate
+        assert "守护线程" in routes["/watch/status"]["note"]
+        assert "sdgun_parsed" in routes["/mag/{path:path}"]["note"]
+
+    def test_route_note_empty_for_unknown_path(self):
+        # 键匹配不到就不附说明(说明缺失不阻塞清单生成)
+        assert sdgun_proxy._route_note("/nonexistent/path") == ""
