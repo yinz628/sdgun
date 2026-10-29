@@ -185,7 +185,7 @@ VPS 侧 Docker 网络（策略路由回程、容器 DNS 固定）三类事故与
 3. 图片：`picapp.sdgun.net` 直连；微信等外链图走 `/core/attachment/attachment/img?url=` 代理（302 跳转）；旧论坛图走 `bbs...magmobileapi.php`（302）。
 4. 聊天：`shuidan.chat.magcloud.net` 为 HTTP 明文 + query token，浏览器端注意混合内容限制（HTTPS 页面下需代理转发）。
 
-TypeScript 类型定义见 `sdgun-api-types.ts`。
+TypeScript 类型定义见 `webui/src/types/sdgun-api-types.ts`。
 
 ---
 
@@ -371,7 +371,7 @@ Web 端可实现：换 chatToken、查未读、判断可私信（userHome.`isCha
 
 `UserHomeResponse` / `UserHomeData` / `UserHomeTabConfig` / `LoadUserItem` /
 `UserDetailResponse` / `UserActivityItem` / `ActivityUser` / `InfoListResponse.totalList`
-（见 `sdgun-api-types.ts` §22）。
+（见 `webui/src/types/sdgun-api-types.ts` §22）。
 
 ### F. Web UI 对应实现
 

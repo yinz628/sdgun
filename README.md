@@ -8,7 +8,7 @@
 | 文件/目录 | 说明 |
 |---|---|
 | `API-ANALYSIS.md` | 接口逆向分析文档（8 份抓包 + 线上实测的全部结论：鉴权、登录、搜索、写操作、WAF 指纹、频道流分页、用户主页、私信收发、评论、签到、外链证书坑、502「帖子不存在」语义等；开头有抓包索引表） |
-| `sdgun-api-types.ts` | 全部接口的 TypeScript 类型定义（类型主文件，webui 内有同步副本，构建时自动校验一致） |
+| `webui/src/types/sdgun-api-types.ts` | 全部接口的 TypeScript 类型定义（唯一源，前端直接引用；原根目录副本与构建期校验脚本已移除） |
 | `sdgun_proxy.py` | 代理应用层：FastAPI 路由、转发核心、`/link` 外链跳桥、`/health` 健康探针、静态托管 |
 | `sdgun_session.py` | 会话层：上游身份头、线程安全会话存储、抓包解析、启动自检（并发探测） |
 | `sdgun_sign.py` | 每日签到：状态解析、守护线程、`/sign` 路由 |
@@ -134,8 +134,9 @@ SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读
   关注关键字匹配与基线/裁剪语义等最易碎的解析与转发逻辑。**升级 requests/urllib3/fastapi 前必须先跑测试**——
   上游 WAF 校验请求头指纹、IPv4 强制依赖 urllib3 私有 API，依赖版本已在
   `deploy/requirements.txt` 锁定，升级是有风险的决定而不是被动接受。
-- **类型双副本**：根目录 `sdgun-api-types.ts` 与 `webui/src/types/` 内副本
-  必须一致，`npm run build` 会自动校验，不一致直接构建失败。
+- **类型定义**：唯一源为 `webui/src/types/sdgun-api-types.ts`（原根目录副本
+  `sdgun-api-types.ts` 与构建期一致性校验脚本 `scripts/check-types-sync.mjs`
+  已于 2026-10-29 移除，前端直接引用该文件）。
 - **双实现同步**：`var row` 提取（Python `sdgun_sign._extract_var_row` ↔ TS
   `media.ts extractThreadRow`）与 HTML 图片改写（`sdgun_proxy._rewrite_html_images`
   ↔ `media.ts prepareCommentHtml`）是同一算法两份实现，上游改格式时两处必须同步。

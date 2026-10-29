@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-types-sync.mjs && tsc --noEmit && vite build",
-    "check:types": "node scripts/check-types-sync.mjs",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
