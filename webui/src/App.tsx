@@ -22,6 +22,39 @@ interface UserView {
   openChat?: boolean;
 }
 
+/**
+ * 可见性门控的周期轮询：仅当页面可见时运行 interval，隐藏时清掉定时器
+ * （不让 interval 空转后再判断 visibility）；切回可见立即补拉一次，不等下一个周期。
+ *
+ * 返回停止函数，effect cleanup 调用即移除定时器与 visibilitychange 监听。
+ * 每次调用独立持有 timer/监听器：React 18 StrictMode(dev)的挂载→卸载→再挂载
+ * 会各建各清，不会泄漏或重复。
+ */
+function startVisibilityPolling(poll: () => void, intervalMs: number): () => void {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const start = () => {
+    if (timer == null) timer = setInterval(poll, intervalMs);
+  };
+  const stop = () => {
+    if (timer != null) { clearInterval(timer); timer = null; }
+  };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') {
+      stop();       // 先清掉隐藏期间可能残留的定时器，再补拉一次
+      poll();
+      start();      // 重新计时：下一个周期从"切回可见"起算
+    } else {
+      stop();       // 隐藏即停，零轮询
+    }
+  };
+  if (document.visibilityState === 'visible') start();
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  return () => {
+    stop();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+  };
+}
+
 /** 全局私信监听:登录后每 15s 轮询一次 unReadMsg,新消息做三件事:
  *  ① 经 sdgun-incoming-msgs 事件分发给打开中的会话面板;
  *  ② 代理侧已归档(打开会话时可从 /messages/local 取回);
@@ -35,7 +68,6 @@ function useIncomingMsgWatcher(me: JsApiUser | null,
   useEffect(() => {
     if (!me) return;
     let stopped = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
     let chatToken = '';
     const seen = new Set<number>();
 
@@ -85,10 +117,11 @@ function useIncomingMsgWatcher(me: JsApiUser | null,
     };
 
     void poll();
-    timer = setInterval(() => void poll(), 15000);
+    // 可见性门控:页面隐藏时零轮询(interval 直接清掉,不空转判断),切回可见立即补拉
+    const stopPolling = startVisibilityPolling(() => void poll(), 15000);
     return () => {
       stopped = true;
-      if (timer) clearInterval(timer);
+      stopPolling();
     };
   }, [me, userViewRef, onIncoming, onOpenConversation]);
 }
@@ -107,7 +140,6 @@ function useNotifyWatcher(me: JsApiUser | null) {
   useEffect(() => {
     if (!me) { setUnseen(0); return; }
     let stopped = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
     const KEY = 'sdgunNotifySeen';
 
     const loadSeen = (): Record<string, number> => {
@@ -156,10 +188,11 @@ function useNotifyWatcher(me: JsApiUser | null) {
     };
 
     void poll(true);   // 首轮静默建立基线,不拿历史通知轰炸用户
-    timer = setInterval(() => void poll(false), 60000);
+    // 可见性门控:隐藏时零轮询,切回可见立即补拉一次(通知为非消费型接口,补拉安全)
+    const stopPolling = startVisibilityPolling(() => void poll(false), 60000);
     return () => {
       stopped = true;
-      if (timer) clearInterval(timer);
+      stopPolling();
     };
   }, [me]);
 
