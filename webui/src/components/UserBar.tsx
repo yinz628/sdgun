@@ -47,7 +47,7 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
   const [watchOpen, setWatchOpen] = useState(false);
 
   const loadUser = useCallback(
-    async (allowFallback = true): Promise<void> => {
+    async (): Promise<void> => {
       setLoading(true);
       setError(null);
       try {
@@ -55,13 +55,8 @@ export default function UserBar({ onUserChange, unread = 0, onClearUnread,
         setUser(resp._USER);
         onUserChange(resp._USER);
       } catch (e) {
-        // 本地覆盖的 Cookie 失效 → 自动降级为代理会话再试一次
-        if (allowFallback && localStorage.getItem('sdgunCookies')) {
-          localStorage.removeItem('sdgunCookies');
-          setCookieDraft('');
-          message.warning('本地 Cookie 已失效，已自动切换为代理会话');
-          return loadUser(false);
-        }
+        // 本地 Cookie 失效的降级已由 api/client 响应拦截器全局兜底
+        // （清 sdgunCookies 后自动重发一次），这里只需呈现最终结果。
         setUser(null);
         onUserChange(null);
         setError((e as ApiError).message);
