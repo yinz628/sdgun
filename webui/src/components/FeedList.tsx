@@ -8,6 +8,7 @@ import { proxiedImage } from '../utils/media';
 import { sanitizeHtml } from '../utils/sanitize';
 import { searchItemToFeed, threadListItemToFeed } from '../utils/adapters';
 import { mergeBoardResults } from '../utils/searchMerge';
+import { buildBoardGroups, type BoardGroupInput } from '../utils/boardGroups';
 import { toastErr } from '../utils/toast';
 import type {
   ChannelCatItem,
@@ -74,10 +75,24 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
 
   const active = tabs.find((t) => t.key === activeKey);
   const searching = keyword.length > 0;
-  /** 版块下拉选项（来自 circleTree，随栏目一起解析进 tabs 的 forum 项；label=版块名，value=fid） */
-  const boardOptions = tabs
-    .filter((t) => t.kind === 'forum')
-    .map((t) => ({ value: t.id, label: t.name }));
+  /**
+   * 版块下拉选项（分组化）：从 circleTree 解析进 tabs 的 forum 项按分组聚合，
+   * 交给 buildBoardGroups 去重（「我的」虚拟分组里的版块让位给真实分类组），
+   * 产出 antd Select 可直接消费的 grouped options。单/多版块两个 Select 共用。
+   */
+  const boardOptions = buildBoardGroups(
+    tabs.reduce<BoardGroupInput[]>((groups, t) => {
+      if (t.kind !== 'forum') return groups;
+      const name = t.group ?? '版块';
+      let g = groups.find((x) => x.name === name);
+      if (!g) {
+        g = { name, boards: [] };
+        groups.push(g);
+      }
+      g.boards.push({ fid: t.id, name: t.name });
+      return groups;
+    }, []),
+  );
 
   // 1) 启动：拉首页框架解析栏目 + 版块树 + 热门搜索词
   //    栏目是整页的骨架,失败自动重试一次(上游 CDN 偶发瞬时抖动),再失败才报错。
