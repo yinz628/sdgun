@@ -96,12 +96,17 @@ export const sdgunApi = {
       step,
     }),
 
-  /** 帖子搜索（注意参数名是复数 keywords；title 字段带高亮 HTML） */
-  searchThreads: (keywords: string, p = 1, step = 20) =>
+  /**
+   * 帖子搜索（注意参数名是复数 keywords；title 字段带高亮 HTML）。
+   * fid 非空时按版块作用域搜索（实测结果全部为该版块条目，全局混入的其它版块被裁掉）；
+   * 空串/缺省即全局搜索——空串时不进请求参数，与现状全局搜索逐字节一致。
+   */
+  searchThreads: (keywords: string, p = 1, step = 20, fid?: string | number) =>
     getJson<ThreadSearchResponse>('/mag/circle/v1/Forum/threadSearch', {
       keywords,
       p,
       step,
+      ...(fid != null && fid !== '' ? { fid } : {}),
     }),
 
   /** 用户搜索（注意参数是 name 单数；user_title 字段带高亮 HTML） */

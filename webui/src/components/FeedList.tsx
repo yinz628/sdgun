@@ -7,6 +7,7 @@ import { sdgunApi } from '../api/sdgun';
 import { proxiedImage } from '../utils/media';
 import { sanitizeHtml } from '../utils/sanitize';
 import { searchItemToFeed, threadListItemToFeed } from '../utils/adapters';
+import { mergeBoardResults } from '../utils/searchMerge';
 import { toastErr } from '../utils/toast';
 import type {
   ChannelCatItem,
@@ -19,6 +20,12 @@ import type {
 // 每页条数(上游实测支持 step=100:分类流/频道流/搜索均如实返回);
 // 20 为默认,可经分页器切换 20/50/100
 const STEP_OPTIONS = [20, 50, 100];
+
+/** 帖子搜索范围：全部（全局，现状）/ 单版块（fid 作用域）/ 多版块（并行合并） */
+type SearchScope = 'all' | 'single' | 'multi';
+
+/** 多版块模式可选版块上限（超过则提示并拒绝本次新增） */
+const MAX_MULTI_BOARDS = 6;
 
 /** 栏目定义：column_type=7 频道 / column_type=1 信息流分类 / 版块（circleTree→fid） */
 interface TabDef {
@@ -48,6 +55,10 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
 
   const [keyword, setKeyword] = useState(''); // 非空 = 搜索模式
   const [searchType, setSearchType] = useState<'thread' | 'user'>('thread');
+  // 搜索范围（仅帖子 tab 生效）：全部（默认，现状）/ 单版块 / 多版块
+  const [scope, setScope] = useState<SearchScope>('all');
+  const [singleFid, setSingleFid] = useState<number>(); // 单版块选中的 fid
+  const [multiFids, setMultiFids] = useState<number[]>([]); // 多版块选中的 fid 列表（≤6）
   const [page, setPage] = useState(1);
   const [stepSize, setStepSize] = useState(20);   // 每页条数,可切 20/50/100
   const [items, setItems] = useState<InfoFeedItem[]>([]);
@@ -63,6 +74,10 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
 
   const active = tabs.find((t) => t.key === activeKey);
   const searching = keyword.length > 0;
+  /** 版块下拉选项（来自 circleTree，随栏目一起解析进 tabs 的 forum 项；label=版块名，value=fid） */
+  const boardOptions = tabs
+    .filter((t) => t.kind === 'forum')
+    .map((t) => ({ value: t.id, label: t.name }));
 
   // 1) 启动：拉首页框架解析栏目 + 版块树 + 热门搜索词
   //    栏目是整页的骨架,失败自动重试一次(上游 CDN 偶发瞬时抖动),再失败才报错。
@@ -149,8 +164,30 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
             setUserResults(resp.list ?? []);
             setItems([]);
             setRawSearch([]);
+          } else if (scope === 'multi' && multiFids.length > 0) {
+            // 多版块：每个 fid 各自一页并行取数，任一失败不阻塞其余（allSettled），
+            // 成功的照常合并展示，失败的计数后用 toastErr 提示
+            const settled = await Promise.allSettled(
+              multiFids.map((fid) => sdgunApi.searchThreads(keyword, page, stepSize, fid)),
+            );
+            const pages: SearchThreadItem[][] = [];
+            const firstErr = settled.find((r) => r.status === 'rejected');
+            for (const r of settled) {
+              if (r.status === 'fulfilled') pages.push(r.value.list ?? []);
+            }
+            const failed = settled.length - pages.length;
+            if (failed > 0) {
+              toastErr(`${failed} 个版块搜索`, (firstErr as PromiseRejectedResult | undefined)?.reason);
+            }
+            const raw = mergeBoardResults(pages);
+            setRawSearch(raw);
+            setItems(raw.map(searchItemToFeed));
+            setUserResults([]);
+            if (page > 1 && raw.length === 0) message.info('没有更多结果了');
           } else {
-            const resp = await sdgunApi.searchThreads(keyword, page, stepSize);
+            // 单版块传 fid 作用域；全部/未选版块传 undefined（全局搜索，与现状一致）
+            const fid = scope === 'single' ? singleFid : undefined;
+            const resp = await sdgunApi.searchThreads(keyword, page, stepSize, fid);
             const raw = resp.list ?? [];
             setRawSearch(raw);
             setItems(raw.map(searchItemToFeed));
@@ -219,7 +256,26 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey, catId, page, keyword, searchType, stepSize]);
+  }, [activeKey, catId, page, keyword, searchType, stepSize, scope, singleFid, multiFids]);
+
+  /**
+   * 进入/切换搜索：与现有关键词提交行为一致（重置页码）。
+   * 首次进入搜索时按当前栏目预置范围——正在版块浏览则默认「单版块」并带上该 fid，
+   * 否则默认「全部」；已在搜索中改词则保留用户已选范围。
+   */
+  const applyKeyword = (kw: string) => {
+    if (!searching) {
+      const cur = tabs.find((t) => t.key === activeKey);
+      if (cur?.kind === 'forum') {
+        setScope('single');
+        setSingleFid(cur.id);
+      } else {
+        setScope('all');
+      }
+    }
+    setKeyword(kw);
+    setPage(1);
+  };
 
   /** 关注用户（写操作） */
   const doFollow = async (u: UserSearchItem) => {
@@ -313,13 +369,13 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
         allowClear
         enterButton
         style={{ marginBottom: searching ? 8 : 12 }}
-        onSearch={(v) => { setKeyword(v.trim()); setPage(1); }}
+        onSearch={(v) => applyKeyword(v.trim())}
       />
       {!searching && hotWords.length > 0 && (
         <Space size={4} wrap style={{ marginBottom: 12 }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>热搜：</Typography.Text>
           {hotWords.map((w) => (
-            <Tag key={w} style={{ cursor: 'pointer' }} onClick={() => { setKeyword(w); setPage(1); }}>
+            <Tag key={w} style={{ cursor: 'pointer' }} onClick={() => applyKeyword(w)}>
               {w}
             </Tag>
           ))}
@@ -336,6 +392,54 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
             { label: '用户', value: 'user' },
           ]}
         />
+      )}
+      {/* 范围选择仅作用于帖子 tab：全部（默认）/ 单版块（fid 作用域）/ 多版块（并行合并） */}
+      {searching && searchType === 'thread' && (
+        <Space size={6} wrap style={{ marginBottom: 12 }}>
+          <Segmented
+            size="small"
+            value={scope}
+            onChange={(v) => { setScope(v as SearchScope); setPage(1); }}
+            options={[
+              { label: '全部', value: 'all' },
+              { label: '单版块', value: 'single' },
+              { label: '多版块', value: 'multi' },
+            ]}
+          />
+          {scope === 'single' && (
+            <Select
+              size="small"
+              style={{ minWidth: 140 }}
+              placeholder="选择版块"
+              value={singleFid}
+              showSearch
+              optionFilterProp="label"
+              onChange={(v) => { setSingleFid(v); setPage(1); }}
+              options={boardOptions}
+            />
+          )}
+          {scope === 'multi' && (
+            <Select
+              size="small"
+              mode="multiple"
+              style={{ minWidth: 240, maxWidth: 320 }}
+              placeholder={`选择版块(最多 ${MAX_MULTI_BOARDS} 个)`}
+              value={multiFids}
+              maxTagCount="responsive"
+              optionFilterProp="label"
+              onChange={(v: number[]) => {
+                // 超限：提示并拒绝本次新增（受控值不变，界面回退），已达上限时禁止再选
+                if (v.length > MAX_MULTI_BOARDS) {
+                  message.warning(`最多选择 ${MAX_MULTI_BOARDS} 个版块`);
+                  return;
+                }
+                setMultiFids(v);
+                setPage(1);
+              }}
+              options={boardOptions}
+            />
+          )}
+        </Space>
       )}
       {/* 服务端搜索结果的高亮样式：<span class="active">关键词</span> */}
       <style>{`.feed-item-title .active { color: #1677ff; font-weight: 600; }`}</style>
@@ -413,6 +517,11 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
                       <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(rawSearch[idx].title) }} />
                     ) : (
                       <span>{item.title}</span>
+                    )}
+                    {/* 全部/多版块模式条目来自不同版块，逐条标注 forum_name；单版块已限定无需重复 */}
+                    {searching && searchType === 'thread' && scope !== 'single'
+                      && rawSearch[idx]?.forum_name && (
+                      <Tag color="blue" style={{ marginRight: 0 }}>{rawSearch[idx].forum_name}</Tag>
                     )}
                     {item.red_packet && item.red_packet.has_red_packet === 1 && (
                       <Tag color="red">红包</Tag>
