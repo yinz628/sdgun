@@ -41,6 +41,9 @@ python -m uvicorn sdgun_proxy:app --host 0.0.0.0 --port 8000
 
 或直接双击 `启动.bat`（自动显示局域网地址）。
 
+> 仅做静态冒烟/验收时用 `启动-冒烟.bat`：它以 `SDGUN_AUTO_SIGN=0 SDGUN_WATCH=0` 启动，
+> 关闭自动签到与关注监控两个守护线程（避免与 VPS 双端轮询），日常使用仍用 `启动.bat`。
+
 > - 局域网访问需 Windows 防火墙放行 8000 端口（已添加入站规则「SDGun Proxy 8000」；
 >   换机器时需管理员执行：`netsh advfirewall firewall add rule name="SDGun Proxy 8000" dir=in action=allow protocol=TCP localport=8000`）
 > - ⚠️ 局域网内任何设备都可使用页面，且共享代理里的登录态（等于你的账号），
