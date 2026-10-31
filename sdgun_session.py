@@ -22,6 +22,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -210,8 +211,23 @@ class SessionStore:
         """启动自检:session.json → 各抓包文件(新→旧),并发校验,取优先级最高的活会话。
 
         并发探测是有意的:原先逐个串行校验,8 份抓包全部失效时(每个 15s 超时)
-        启动阻塞可达分钟级。全部失效时以最高优先级候选占位,等用户重放登录。
+        启动阻塞可达分钟级。但并发度收敛为 2(原为 4):启动时同时试探多枚陈旧
+        Cookie(最老可到数月前)构成「批量试旧 token」画像,与上游风控敏感行为
+        重合,故降载。全部失效时以最高优先级候选占位,等用户重放登录。
+
+        抓包候选按文件 mtime 年龄过滤:超过 SDGUN_CAPTURE_MAX_AGE_DAYS 天(默认
+        30,环境变量可在运行时调整;设为 0 关闭过滤)的抓包整份跳过——几个月前的
+        抓包里的 Cookie 必然失效,拿来试探只有画像代价、没有命中收益。sdgun_session.json
+        永远参与、不受年龄限制(它是当前活跃会话的唯一事实来源)。
         """
+        # 环境变量在函数内读取(而非 import 时求值):运行时可配,便于运维不改代码
+        # 调整冷启动窗口(沿用阶段 3 的惯例)。
+        try:
+            max_age_days = int(os.environ.get("SDGUN_CAPTURE_MAX_AGE_DAYS", "30"))
+        except ValueError:
+            logger.warning("[session] SDGUN_CAPTURE_MAX_AGE_DAYS 非法,回落默认 30 天")
+            max_age_days = 30
+
         candidates: list[tuple[str, dict]] = []
         if os.path.exists(self.session_file):
             try:
@@ -222,6 +238,12 @@ class SessionStore:
             except (OSError, ValueError) as exc:
                 logger.warning("读取会话文件失败: %s", exc)
         for path in capture_files(self.data_dir):
+            if max_age_days > 0:
+                age_days = (time.time() - os.path.getmtime(path)) / 86400
+                if age_days > max_age_days:
+                    logger.info("[session] 跳过过期抓包 %s(%.1f 天前,> %d 天上限)",
+                                os.path.basename(path), age_days, max_age_days)
+                    continue
             jar = extract_capture_jar(path)
             if jar:
                 candidates.append((os.path.basename(path), jar))
@@ -232,7 +254,7 @@ class SessionStore:
             return
 
         results: dict[int, bool] = {}
-        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+        with ThreadPoolExecutor(max_workers=min(2, len(candidates))) as pool:
             futures = {
                 pool.submit(self._validate_jar, jar): idx
                 for idx, (_tag, jar) in enumerate(candidates)

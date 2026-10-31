@@ -2,9 +2,12 @@
 """SessionStore(会话存储)与 find_login_record(登录重放源)的单元测试(离线)。"""
 
 import json
+import logging
+import os
 import threading
+import time
 
-from sdgun_session import SessionStore, find_login_record
+from sdgun_session import AUTH_COOKIE_NAME, SessionStore, find_login_record
 
 
 class _FakeHeaders:
@@ -120,3 +123,103 @@ class TestFindLoginRecord:
             json.dump([{"url": "https://mag1.sdgun.net/mag/other",
                         "method": "POST", "request_body": "x"}], f)
         assert find_login_record(str(tmp_path)) is None
+
+
+# ============================ 启动自检:并发降载 + 抓包年龄过滤 ============================
+
+def _write_capture(path, cookie_value: str) -> None:
+    """写一份含鉴权 Cookie 的最小抓包(jsApi 请求头带 cookie)。"""
+    rec = {
+        "url": "https://mag1.sdgun.net/mag/index/v1/Index/jsApi",
+        "method": "GET",
+        "request_headers": json.dumps({"cookie": f"{AUTH_COOKIE_NAME}={cookie_value}"}),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([rec], f)
+
+
+def _age_file(path, days: float) -> None:
+    """把文件 mtime 设为 days 天前(模拟陈旧抓包)。"""
+    t = time.time() - days * 86400
+    os.utime(path, (t, t))
+
+
+def _probe_recorder(monkeypatch, live: set[str] | None = None):
+    """把 _validate_jar 换成离线替身:记录被探测的鉴权 Cookie 值,不发网络。
+
+    live 中的 Cookie 值视为有效;None 表示全部有效。
+    """
+    probed: list[str] = []
+
+    def fake_validate(self, jar):  # noqa: ANN001 —— 与真实签名一致
+        value = (jar or {}).get(AUTH_COOKIE_NAME)
+        probed.append(value)
+        return live is None or value in live
+
+    monkeypatch.setattr(SessionStore, "_validate_jar", fake_validate)
+    return probed
+
+
+class TestInitFromDisk:
+    """启动自检:超龄抓包跳过、新抓包参与、环境变量可关闭过滤。"""
+
+    def test_old_capture_skipped_new_participates(self, tmp_path, monkeypatch, caplog):
+        caps = tmp_path / "captures"
+        caps.mkdir()
+        new_p = caps / "sdgun-new.json"
+        old_p = caps / "sdgun-old.json"
+        _write_capture(new_p, "NEW")
+        _write_capture(old_p, "OLD")
+        _age_file(old_p, 40)   # 40 天前 > 默认 30 天上限
+
+        probed = _probe_recorder(monkeypatch)
+        with caplog.at_level(logging.INFO, logger="sdgun.session"):
+            s = SessionStore(str(tmp_path))
+            s.init_from_disk()
+
+        assert probed == ["NEW"]                       # 旧抓包未被探测
+        assert s.snapshot().get(AUTH_COOKIE_NAME) == "NEW"
+        assert "sdgun-old.json" in caplog.text         # 跳过留痕(含文件名)
+        assert "跳过过期抓包" in caplog.text
+
+    def test_fresh_capture_participates(self, tmp_path, monkeypatch):
+        caps = tmp_path / "captures"
+        caps.mkdir()
+        _write_capture(caps / "sdgun-new.json", "NEW")
+
+        probed = _probe_recorder(monkeypatch)
+        s = SessionStore(str(tmp_path))
+        s.init_from_disk()
+
+        assert probed == ["NEW"]
+        assert s.snapshot().get(AUTH_COOKIE_NAME) == "NEW"
+
+    def test_max_age_zero_disables_filter(self, tmp_path, monkeypatch):
+        caps = tmp_path / "captures"
+        caps.mkdir()
+        old_p = caps / "sdgun-old.json"
+        _write_capture(old_p, "OLD")
+        _age_file(old_p, 40)
+        monkeypatch.setenv("SDGUN_CAPTURE_MAX_AGE_DAYS", "0")   # 0 = 不过滤
+
+        probed = _probe_recorder(monkeypatch)
+        SessionStore(str(tmp_path)).init_from_disk()
+
+        assert probed == ["OLD"]   # 关闭过滤后超龄抓包仍参与
+
+    def test_session_json_not_subject_to_age_filter(self, tmp_path, monkeypatch):
+        # sdgun_session.json 永远参与,不受年龄过滤影响(当前会话的唯一事实来源)
+        caps = tmp_path / "captures"
+        caps.mkdir()
+        old_p = caps / "sdgun-old.json"
+        _write_capture(old_p, "OLD")
+        _age_file(old_p, 40)
+        with open(tmp_path / "sdgun_session.json", "w", encoding="utf-8") as f:
+            json.dump({"cookies": {AUTH_COOKIE_NAME: "SESS"}}, f)
+
+        probed = _probe_recorder(monkeypatch)
+        s = SessionStore(str(tmp_path))
+        s.init_from_disk()
+
+        assert probed == ["SESS"]   # 只有 session.json 被探测(旧抓包跳过),且优先选中
+        assert s.snapshot().get(AUTH_COOKIE_NAME) == "SESS"
