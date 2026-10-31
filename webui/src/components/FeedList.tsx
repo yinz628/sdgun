@@ -22,7 +22,7 @@ import type {
 // 20 为默认,可经分页器切换 20/50/100
 const STEP_OPTIONS = [20, 50, 100];
 
-/** 帖子搜索范围：全部（全局，现状）/ 单版块（fid 作用域）/ 多版块（并行合并） */
+/** 帖子搜索范围：全部（全局，现状）/ 单版块（fid 作用域）/ 多版块（串行错峰合并） */
 type SearchScope = 'all' | 'single' | 'multi';
 
 /** 多版块模式可选版块上限（超过则提示并拒绝本次新增） */
@@ -180,20 +180,24 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
             setItems([]);
             setRawSearch([]);
           } else if (scope === 'multi' && multiFids.length > 0) {
-            // 多版块：每个 fid 各自一页并行取数，任一失败不阻塞其余（allSettled），
-            // 成功的照常合并展示，失败的计数后用 toastErr 提示
-            const settled = await Promise.allSettled(
-              multiFids.map((fid) => sdgunApi.searchThreads(keyword, page, stepSize, fid)),
-            );
+            // 多版块：逐版块「串行 + 300ms 错峰」取数。原先是 6 路并发 Promise.allSettled，
+            // 突发请求画像易触上游风控；改为 for..of 顺序 await，每个非首个版块前错峰
+            // 300ms，单版块失败 try/catch 记录后继续（不阻塞后续），失败计数与提示语义
+            // 与并发版一致。整批耗时≈版块数×(单次请求+300ms)，6 版块约 2-3 秒，可接受。
             const pages: SearchThreadItem[][] = [];
-            const firstErr = settled.find((r) => r.status === 'rejected');
-            for (const r of settled) {
-              if (r.status === 'fulfilled') pages.push(r.value.list ?? []);
+            let failed = 0;
+            let firstErr: unknown;
+            for (let i = 0; i < multiFids.length; i += 1) {
+              if (i > 0) await new Promise((r) => setTimeout(r, 300));
+              try {
+                const resp = await sdgunApi.searchThreads(keyword, page, stepSize, multiFids[i]);
+                pages.push(resp.list ?? []);
+              } catch (e) {
+                failed += 1;
+                if (firstErr === undefined) firstErr = e;
+              }
             }
-            const failed = settled.length - pages.length;
-            if (failed > 0) {
-              toastErr(`${failed} 个版块搜索`, (firstErr as PromiseRejectedResult | undefined)?.reason);
-            }
+            if (failed > 0) toastErr(`${failed} 个版块搜索`, firstErr);
             const raw = mergeBoardResults(pages);
             setRawSearch(raw);
             setItems(raw.map(searchItemToFeed));
@@ -408,7 +412,7 @@ export default function FeedList({ selectedId, onSelect, onOpenUser }: Props) {
           ]}
         />
       )}
-      {/* 范围选择仅作用于帖子 tab：全部（默认）/ 单版块（fid 作用域）/ 多版块（并行合并） */}
+      {/* 范围选择仅作用于帖子 tab：全部（默认）/ 单版块（fid 作用域）/ 多版块（串行错峰合并） */}
       {searching && searchType === 'thread' && (
         <Space size={6} wrap style={{ marginBottom: 12 }}>
           <Segmented
