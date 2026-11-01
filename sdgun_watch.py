@@ -33,10 +33,17 @@
 
 配置:
   SDGUN_WATCH=0            关闭守护线程(默认开启)
-  SDGUN_WATCH_INTERVAL=60  轮询间隔秒(夹在 20..3600;0 也表示关闭)
+  SDGUN_WATCH_INTERVAL=120 轮询间隔基准秒(夹在 20..3600;0 也表示关闭)
   SDGUN_WATCH_FID          版块源(fid),优先级最高,交易类关键字推荐
   SDGUN_WATCH_CHANNEL_ID / SDGUN_WATCH_CAT_ID  频道分类源(两者都设才生效)
 配置值非法一律回退默认并告警——守护线程不能死于配置笔误(同 sdgun_sign)。
+
+轮询节律(2026-11 二轮加固:降固定节拍的机器画像):
+  - 抖动:每轮实际间隔 = 基准 × uniform(0.8, 1.2)(±20%),消掉"整分/整点"式机械节奏;
+  - 失败退避:连续失败时间隔按 2^n 翻倍(上限 10×基准),任一轮成功即复位。会话失效
+    (1001/登录过期)与网络失败同样计入——会话已死还按固定节拍打上游是最坏的画像;
+  - 无规则怠速:没有任何**启用**规则时跳过上游轮询(仅本地休眠),进入/退出怠速各记一条
+    info;有规则才轮询。手动「立即检测」不受怠速影响(路由直调 poll_once)。
 
 提醒时间窗(运行时可改,持久化在 settings.window_hours,默认 24,取值 12/24/48):
   只提醒"发布时间在 N 小时内"的帖子,用来压掉"旧帖被算法翻出"的误报。发布时间取条目
@@ -60,6 +67,7 @@ seen_ids ≤ MAX_SEEN_IDS(30000,须覆盖最长窗口 48h × 峰值发帖速率)
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -94,6 +102,11 @@ MAX_SEEN_IDS = 30000
 # 提醒时间窗(小时):只提醒"发布时间在 N 小时内"的帖子,过滤被算法翻出的旧帖
 WINDOW_HOURS_CHOICES = (12, 24, 48)
 DEFAULT_WINDOW_HOURS = 24
+
+# 轮询节律(守护线程;2026-11 二轮加固,降低固定节拍的机器画像)
+JITTER_MIN = 0.8          # 抖动下限系数(base × 0.8)
+JITTER_MAX = 1.2          # 抖动上限系数(base × 1.2)
+BACKOFF_MAX_MULTIPLIER = 10   # 连续失败退避上限:间隔最多放大到 10×base
 
 # 关键字分隔:中英文逗号/顿号/任意空白
 KEYWORD_SPLIT_RE = re.compile(r"[,，、\s]+")
@@ -311,6 +324,14 @@ class WatchStore:
     def list_rules(self) -> list[dict]:
         with self._lock:
             return [dict(r) for r in self._rules]
+
+    def has_enabled_rules(self) -> bool:
+        """是否存在启用的规则:守护线程据此决定轮询还是怠速(无规则时零上游请求)。
+
+        停用(而非删除)规则也算"无规则"——用户临时静音时不该继续空转打上游。
+        """
+        with self._lock:
+            return any(r.get("enabled", True) for r in self._rules)
 
     # ============================ 匹配 ============================
 
@@ -763,7 +784,7 @@ def _parse_int(raw, default: int, what: str) -> int:
         return default
 
 
-_RAW_INTERVAL = _parse_int(os.environ.get("SDGUN_WATCH_INTERVAL", "60"), 60,
+_RAW_INTERVAL = _parse_int(os.environ.get("SDGUN_WATCH_INTERVAL", "120"), 120,
                            "SDGUN_WATCH_INTERVAL")
 WATCH_ENABLED = os.environ.get("SDGUN_WATCH", "1") != "0" and _RAW_INTERVAL != 0
 WATCH_INTERVAL = min(3600, max(20, _RAW_INTERVAL))
@@ -772,15 +793,74 @@ _started = False
 _start_lock = threading.Lock()
 
 
+def _jittered_interval(base: float) -> float:
+    """在 base 上叠加 ±20% 随机抖动:base × uniform(0.8, 1.2)。
+
+    固定节拍(整分/整点)本身就是机器画像,抖动把它打散。系数再夹取回
+    [JITTER_MIN, JITTER_MAX]:即便注入/伪造的 uniform 越界也不会飞出范围。
+    """
+    factor = random.uniform(JITTER_MIN, JITTER_MAX)
+    factor = min(JITTER_MAX, max(JITTER_MIN, factor))
+    return base * factor
+
+
+class PollBackoff:
+    """轮询间隔退避状态机(仅守护线程单线程使用,无需加锁)。
+
+    连续失败时间隔按 2^n 翻倍(上限 BACKOFF_MAX_MULTIPLIER×base),任一轮成功即复位。
+    失败含会话失效(1001/登录过期)与网络异常——poll_once 已把它们统一成 ok=False。
+    实际间隔仍在退避基准上叠加抖动(见 _jittered_interval)。
+    """
+
+    def __init__(self, base: int, max_multiplier: int = BACKOFF_MAX_MULTIPLIER):
+        self.base = base
+        self.max_multiplier = max_multiplier
+        self.consecutive_failures = 0
+
+    def record(self, ok: bool) -> None:
+        """记录一轮结果:成功清零,失败累加。"""
+        self.consecutive_failures = 0 if ok else self.consecutive_failures + 1
+
+    def reset(self) -> None:
+        """复位退避(怠速期间不轮询,恢复时从基准间隔重新起算)。"""
+        self.consecutive_failures = 0
+
+    def next_interval(self) -> float:
+        """下一轮休眠时长:base × min(2^failures, 上限) × 抖动系数。"""
+        mult = min(2 ** self.consecutive_failures, self.max_multiplier)
+        return _jittered_interval(self.base * mult)
+
+
+def _watch_iteration(backoff: PollBackoff, idle: bool) -> bool:
+    """守护线程的一轮(可测单元):无启用规则 → 怠速跳过上游;否则 poll_once。
+
+    返回本轮结束后的怠速状态(True=正在怠速)。异常不外抛——单轮失败不能让守护线程
+    死掉;轮询异常同样计入退避。
+    """
+    try:
+        if not store.has_enabled_rules():
+            if not idle:
+                logger.info("[watch] 无启用的关注规则,暂停上游轮询(怠速)")
+                backoff.reset()   # 怠速不轮询,恢复时从基准间隔重新起算
+            return True
+        if idle:
+            logger.info("[watch] 检测到启用的关注规则,恢复上游轮询")
+        res = poll_once(store)
+        if not res.get("ok"):
+            logger.warning("[watch] 本轮检测未成功: %s", res.get("error"))
+        backoff.record(bool(res.get("ok")))
+    except Exception as exc:  # noqa: BLE001 —— 守护线程不能死
+        logger.warning("[watch] 轮询异常: %s", exc)
+        backoff.record(False)
+    return False
+
+
 def _watch_loop() -> None:
+    backoff = PollBackoff(WATCH_INTERVAL)
+    idle = False
     while True:
-        try:
-            res = poll_once(store)
-            if not res.get("ok"):
-                logger.warning("[watch] 本轮检测未成功: %s", res.get("error"))
-        except Exception as exc:  # noqa: BLE001 —— 守护线程不能死
-            logger.warning("[watch] 轮询异常: %s", exc)
-        time.sleep(WATCH_INTERVAL)
+        idle = _watch_iteration(backoff, idle)
+        time.sleep(backoff.next_interval())
 
 
 def start_watcher() -> None:
@@ -794,8 +874,8 @@ def start_watcher() -> None:
             return
         _started = True
     threading.Thread(target=_watch_loop, daemon=True, name="watch").start()
-    logger.info("[watch] 关注监控已启动:每 %d 秒轮询一次(首次只建立基线,不回溯历史帖)",
-                WATCH_INTERVAL)
+    logger.info("[watch] 关注监控已启动:基准 %d 秒轮询(±20%% 抖动;失败退避;无规则怠速;"
+                "首次只建立基线,不回溯历史帖)", WATCH_INTERVAL)
 
 
 # ============================ 路由 ============================

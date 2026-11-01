@@ -847,3 +847,145 @@ class TestWatchRoutes:
         fake = {"ok": True, "new_items": 3, "hits_added": 1, "error": None}
         monkeypatch.setattr(sdgun_watch, "poll_once", lambda _st: fake)
         assert client.post("/watch/run").json() == fake
+
+
+class TestWatchDaemonPacing:
+    """守护线程轮询节律(2026-11 二轮加固):无规则怠速 / 失败退避 / ±20% 抖动。
+
+    _watch_iteration 是守护线程一轮的可测单元(无规则 → 怠速跳过上游;否则 poll_once),
+    这里全部离线跑:源用缓存(fid)避免 _resolve_source 走网络,_fetch_feed 注入假数据,
+    上游 client 换成 _NoNetworkClient 兜底(一旦真发请求就大声失败)。
+    """
+
+    def _store(self, tmp_path, monkeypatch):
+        st = WatchStore(str(tmp_path))
+        monkeypatch.setattr(sdgun_watch, "store", st)
+        # 缓存源(env 源会覆盖缓存,故先清 env),让 _resolve_source 不走网络
+        monkeypatch.delenv("SDGUN_WATCH_FID", raising=False)
+        monkeypatch.delenv("SDGUN_WATCH_CHANNEL_ID", raising=False)
+        monkeypatch.delenv("SDGUN_WATCH_CAT_ID", raising=False)
+        st.set_source({"fid": 176, "forum_name": ""})
+        return st
+
+    def test_idle_skips_upstream_when_no_rules(self, tmp_path, monkeypatch):
+        """没有任何规则 → 怠速:不触发上游拉取(现有 _NoNetworkClient 一旦被调用即失败)。"""
+        st = self._store(tmp_path, monkeypatch)
+        monkeypatch.setattr(sdgun_watch, "upstream_client", _NoNetworkClient())
+        fetched = []
+        monkeypatch.setattr(sdgun_watch, "_fetch_feed",
+                            lambda src: (fetched.append(src), ([], None))[1])
+        backoff = sdgun_watch.PollBackoff(sdgun_watch.WATCH_INTERVAL)
+
+        assert sdgun_watch._watch_iteration(backoff, False) is True   # 进入怠速
+        assert fetched == []                                          # 未拉取上游
+        assert st.status()["polls"] == 0                              # 未发生轮询
+
+    def test_disabled_rule_still_counts_as_idle(self, tmp_path, monkeypatch):
+        """停用(非删除)规则同样视为"无启用规则":临时静音时不该继续空转打上游。"""
+        st = self._store(tmp_path, monkeypatch)
+        st.add_rule("", "出")
+        st.toggle_rule(st.list_rules()[0]["id"])      # 停用
+        assert st.has_enabled_rules() is False
+        fetched = []
+        monkeypatch.setattr(sdgun_watch, "_fetch_feed",
+                            lambda src: (fetched.append(src), ([], None))[1])
+        backoff = sdgun_watch.PollBackoff(sdgun_watch.WATCH_INTERVAL)
+
+        assert sdgun_watch._watch_iteration(backoff, False) is True
+        assert fetched == []
+
+    def test_resumes_polling_when_rule_enabled(self, tmp_path, monkeypatch):
+        """有启用规则 → 退出怠速并真正轮询一次。"""
+        st = self._store(tmp_path, monkeypatch)
+        fetched = []
+        monkeypatch.setattr(sdgun_watch, "_fetch_feed",
+                            lambda src: (fetched.append(src), ([_item(1, "出 Glock")], None))[1])
+        backoff = sdgun_watch.PollBackoff(sdgun_watch.WATCH_INTERVAL)
+        st.add_rule("", "出")
+
+        assert sdgun_watch._watch_iteration(backoff, True) is False   # 退出怠速
+        assert len(fetched) == 1
+        assert st.status()["polls"] == 1
+
+    def test_backoff_doubles_on_failures_then_resets_on_success(self, monkeypatch):
+        """连续失败 → 间隔翻倍;任一轮成功即复位(去抖动以断言纯倍数)。"""
+        monkeypatch.setattr(sdgun_watch.random, "uniform", lambda a, b: 1.0)
+        b = sdgun_watch.PollBackoff(120)
+        assert b.next_interval() == 120                 # 无失败:基准
+        b.record(False)
+        assert b.next_interval() == 240                 # 1 次失败:2×
+        b.record(False)
+        assert b.next_interval() == 480                 # 2 次失败:4×
+        b.record(True)
+        assert b.next_interval() == 120                 # 成功复位
+        assert b.consecutive_failures == 0
+
+    def test_backoff_caps_at_ten_times_base(self, monkeypatch):
+        monkeypatch.setattr(sdgun_watch.random, "uniform", lambda a, b: 1.0)
+        b = sdgun_watch.PollBackoff(100)
+        for _ in range(20):
+            b.record(False)
+        assert b.next_interval() == 1000                 # 10×base 封顶,不无限放大
+
+    def test_jitter_uses_uniform_range_and_clamps(self, monkeypatch):
+        """抖动系数以 (0.8,1.2) 调 uniform;越界注入也夹回范围内(断言夹取)。"""
+        seen = []
+
+        def fake_uniform(a, b):
+            seen.append((a, b))
+            return 0.9
+
+        monkeypatch.setattr(sdgun_watch.random, "uniform", fake_uniform)
+        assert sdgun_watch._jittered_interval(120) == pytest.approx(108)
+        assert seen[0] == (0.8, 1.2)                     # 实参即抖动区间
+
+        monkeypatch.setattr(sdgun_watch.random, "uniform", lambda a, b: 5.0)
+        assert sdgun_watch._jittered_interval(120) == pytest.approx(144)   # 夹到 1.2
+        monkeypatch.setattr(sdgun_watch.random, "uniform", lambda a, b: 0.0)
+        assert sdgun_watch._jittered_interval(120) == pytest.approx(96)    # 夹到 0.8
+
+    def test_jitter_stays_within_20_percent_for_real_uniform(self, monkeypatch):
+        """真实 uniform:多轮结果都落在 [0.8,1.2]×base(96..144)。"""
+        for _ in range(300):
+            assert 96 <= sdgun_watch._jittered_interval(120) <= 144
+
+    def test_iteration_success_resets_backoff(self, tmp_path, monkeypatch):
+        st = self._store(tmp_path, monkeypatch)
+        st.add_rule("", "出")
+        monkeypatch.setattr(sdgun_watch, "_fetch_feed", lambda src: ([_item(1, "帖")], None))
+        b = sdgun_watch.PollBackoff(120)
+        b.record(False)
+        b.record(False)
+        assert sdgun_watch._watch_iteration(b, False) is False
+        assert b.consecutive_failures == 0               # 一轮成功即复位
+
+    def test_login_expired_failure_also_backs_off(self, tmp_path, monkeypatch):
+        """会话失效(1001/登录过期)与网络失败一样计入退避——会话已死还按固定节拍打上游最坏。"""
+        st = self._store(tmp_path, monkeypatch)
+        st.add_rule("", "出")
+        monkeypatch.setattr(sdgun_watch.random, "uniform", lambda a, b: 1.0)
+
+        def boom(_src):
+            raise RuntimeError("登录信息已过期(code=1001)")
+
+        monkeypatch.setattr(sdgun_watch, "_fetch_feed", boom)
+        b = sdgun_watch.PollBackoff(120)
+        assert sdgun_watch._watch_iteration(b, False) is False
+        assert b.consecutive_failures == 1
+        assert b.next_interval() == 240                  # 退避已翻倍
+        assert st.status()["last_error"]                 # 失败已留痕
+
+    def test_default_interval_is_120_seconds(self):
+        """默认间隔 60→120(夹取范围不变):在干净 env 的子进程里导入模块验证。"""
+        import os
+        import subprocess
+        import sys
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("SDGUN_WATCH_INTERVAL", "SDGUN_WATCH", "SDGUN_DATA_DIR")}
+        code = ("import sdgun_watch as w; "
+                "print(w.WATCH_INTERVAL, w.WATCH_ENABLED)")
+        out = subprocess.run([sys.executable, "-c", code],
+                             cwd=os.path.dirname(os.path.abspath(sdgun_watch.__file__)),
+                             env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.split() == ["120", "True"]
