@@ -97,7 +97,7 @@ VPS 侧 Docker 网络（策略路由回程、容器 DNS 固定）三类事故与
 ## 2. Query / Body 参数释义
 
 ### POST /mag/user/v1/User/repairChatAndResToken
-- Body (form): `user_id=683237` — 当前用户 ID
+- Body (form): `user_id=<uid>` — 当前用户 ID
 - Resp: `data.chatToken` — 聊天服务专用 token（与主站 token 不同）
 
 ### GET /mag/index/v2/index/pages
@@ -139,7 +139,7 @@ VPS 侧 Docker 网络（策略路由回程、容器 DNS 固定）三类事故与
 ### GET shuidan.chat.magcloud.net/msg/*
 - `app_key=shuidan`：应用标识（固定）
 - `token`：聊天 token（repairChatAndResToken 换取）
-- `user_id=user683237`：用户 ID 加 `user` 前缀
+- `user_id=user<uid>`：用户 ID 加 `user` 前缀
 - `step=100`（unReadMsg）：单次拉取上限
 
 ---
@@ -237,7 +237,7 @@ TypeScript 类型定义见 `webui/src/types/sdgun-api-types.ts`。
 ```
 POST /mag/user/v1/user/login
 Content-Type: application/x-www-form-urlencoded
-Body: account=TATang&password=<RSA加密后Base64，256字节>
+Body: account=T***g&password=<RSA加密后Base64，256字节>
 ```
 
 - 原生通道发起（带 mag-ss-key / mag-version / MAGAPPX UA / PHPSESSID 等）。
@@ -351,7 +351,7 @@ tab_config（config_id → 数据接口）：
 
 | 方法 | 路径 | 参数/体 | 说明 |
 |---|---|---|---|
-| POST | `/mag/user/v1/User/repairChatAndResToken` | `user_id=<自己的uid>` | → `data.chatToken`（环信密码；账号为 `user<uid>`，如 user683237） |
+| POST | `/mag/user/v1/User/repairChatAndResToken` | `user_id=<自己的uid>` | → `data.chatToken`（环信密码；账号为 `user<uid>`，如 user<uid>） |
 | GET | `shuidan.chat.magcloud.net/msg/unReadMsg` | `app_key=shuidan&token=<chatToken>&user_id=user<uid>&step=100` | `{msgs:[], unRead:0}`（样本无未读，msgs 结构未见） |
 | GET | `shuidan.chat.magcloud.net/msg/groupMsgCount` | 同上（无 step） | 群未读计数数组（样本 `[]`） |
 | GET | `/mag/easemob/ChatGroups/getChatGroupAnnouncement` | - | 聊天群公告/配置 `{is_all_silence, chat_allow_recover, ...}` |
@@ -391,7 +391,7 @@ Web 端可实现：换 chatToken、查未读、判断可私信（userHome.`isCha
 |---|---|
 | `app_key` | `shuidan` |
 | `token` | chatToken（repairChatAndResToken 换取） |
-| `user_id` | `user<自己uid>`（如 user683237） |
+| `user_id` | `user<自己uid>`（如 user<uid>） |
 | `data[to_user_id]` | `user<对方uid>`（如 user287763） |
 | `data[body_type]` | `1`（文本） |
 | `data[content]` | JSON 字符串 `{"text":"消息内容"}` |

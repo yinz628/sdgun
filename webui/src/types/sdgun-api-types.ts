@@ -72,7 +72,7 @@ export interface UserBrief {
 /* ============ 1. repairChatAndResToken ============ */
 
 export interface RepairTokenRequest {
-  user_id: string; // form: user_id=683237
+  user_id: string; // form: user_id=<uid>
 }
 
 export interface RepairTokenResponse extends ApiEnvelope {
