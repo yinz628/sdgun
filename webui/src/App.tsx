@@ -56,7 +56,7 @@ function startVisibilityPolling(poll: () => void, intervalMs: number): () => voi
   };
 }
 
-/** 全局私信监听:登录后每 15s 轮询一次 unReadMsg,新消息做三件事:
+/** 全局私信监听:登录后每 30s 轮询一次 unReadMsg,新消息做三件事:
  *  ① 经 sdgun-incoming-msgs 事件分发给打开中的会话面板;
  *  ② 代理侧已归档(打开会话时可从 /messages/local 取回);
  *  ③ 非当前打开对端的来信用 notification 弹提醒并累计顶栏角标,点击直达对话。
@@ -119,7 +119,8 @@ function useIncomingMsgWatcher(me: JsApiUser | null,
 
     void poll();
     // 可见性门控:页面隐藏时零轮询(interval 直接清掉,不空转判断),切回可见立即补拉
-    const stopPolling = startVisibilityPolling(() => void poll(), 15000);
+    // 30s 降频:unReadMsg 是消费型 + 高频接口,是页面打开时最密集的上游调用
+    const stopPolling = startVisibilityPolling(() => void poll(), 30000);
     return () => {
       stopped = true;
       stopPolling();

@@ -68,7 +68,7 @@ export default function ChatModal({ open, onClose, autoOpen = false, userId, me,
   const openChatRef = useRef<() => Promise<void>>();
 
   /** 打开聊天:本地归档历史 → 换 chatToken → 补拉一次未读。
-   *  后续新消息由 App 层的全局监听器(15s 轮询)经 sdgun-incoming-msgs 事件推送,
+   *  后续新消息由 App 层的全局监听器(30s 轮询)经 sdgun-incoming-msgs 事件推送,
    *  本面板不再自建 interval(避免泄漏与双重消费)。 */
   const openChat = async () => {
     if (!me) {
@@ -234,7 +234,7 @@ export default function ChatModal({ open, onClose, autoOpen = false, userId, me,
           </Button>
         </Space.Compact>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-          历史来自代理本地归档（/messages/local，自部署起累积）；新消息由全局监听每 15 秒
+          历史来自代理本地归档（/messages/local，自部署起累积）；新消息由全局监听每 30 秒
           轮询推送。上游未读拉取即清、无历史接口（App 走环信长连接），App 先读走的消息无法归档。
         </Typography.Paragraph>
       </Spin>
