@@ -6,7 +6,7 @@ deploy.py(全量)/update_dist.py(增量)/monitor.py(监控)共用。此前三个
 "两个部署脚本都要加 --dns",重复即同步负担;现在容器参数只此一处。
 
 凭据一律从环境变量读取,不再硬编码进脚本(避免随仓库/AI 工具/备份外流):
-  SDGUN_DEPLOY_HOST       目标主机(默认 192.168.2.197)
+  SDGUN_DEPLOY_HOST       目标主机(默认 192.168.2.144)
   SDGUN_DEPLOY_USER       登录用户(默认 root)
   SDGUN_DEPLOY_PASSWORD   密码登录
   SDGUN_DEPLOY_KEYFILE    私钥文件路径(设置了则优先于密码)
@@ -22,7 +22,7 @@ import sys
 
 import paramiko
 
-HOST = os.environ.get("SDGUN_DEPLOY_HOST", "192.168.2.197")
+HOST = os.environ.get("SDGUN_DEPLOY_HOST", "192.168.2.144")
 USER = os.environ.get("SDGUN_DEPLOY_USER", "root")
 LOCAL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # F:\rchang\sdgun
 REMOTE_APP = "/opt/sdgun/app"

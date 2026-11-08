@@ -59,14 +59,14 @@ python -m uvicorn sdgun_proxy:app --host 127.0.0.1 --port 8000
 cd webui && npm run dev   # http://localhost:5173
 ```
 
-### Docker 部署到服务器（已部署至 192.168.2.197:50002）
+### Docker 部署到服务器（已部署至 192.168.2.144:50002）
 
 ```bash
 # 凭据经环境变量传入（不再写死在脚本里，避免随仓库/备份/AI 工具外流）：
 #   PowerShell:  $env:SDGUN_DEPLOY_PASSWORD='...'
 #   Git Bash:    SDGUN_DEPLOY_PASSWORD=... python deploy/deploy.py
 # 也可用私钥：SDGUN_DEPLOY_KEYFILE=~/.ssh/id_rsa；主机/用户可用
-#   SDGUN_DEPLOY_HOST / SDGUN_DEPLOY_USER 覆盖（默认 192.168.2.197 / root）
+#   SDGUN_DEPLOY_HOST / SDGUN_DEPLOY_USER 覆盖（默认 192.168.2.144 / root）
 SDGUN_DEPLOY_PASSWORD=... python deploy/update_dist.py   # 日常用这个（增量，不碰数据卷）
 SDGUN_DEPLOY_PASSWORD=... python deploy/deploy.py        # 全量：会覆盖数据卷里的会话文件，慎用
 SDGUN_DEPLOY_PASSWORD=... python deploy/monitor.py       # 部署后九项只读巡检（--wait N 复查健康态）
