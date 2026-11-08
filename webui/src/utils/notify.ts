@@ -33,12 +33,14 @@ export function fmtEpochSec(epochSec: number): string {
  * 会换 hit_id——历史去重只留最新一条、hits 超 1000 条 FIFO 裁剪、seen 丢失后重新命中,
  * 都会产生新的 hit_id。按 hit_id 记会表现为"之前已读的帖子又变回未读"(用户实测反馈)。
  *
- * 容量 2000(与命中保留量同量级),数值降序去重,超出保留最新。与 sdgunWatchSeen
+ * 容量 10000(2026-11 由 2000 上调:高流量版块 ~170 命中/天下 2000 约十余天即淘空,
+ * 被淘汰标记的帖子经算法重命中会以未读复活;服务端摄入时另给已读帖打 pre_read 标,
+ * 见 WatchDrawer/App 的未读口径),数值降序去重,超出保留最新。与 sdgunWatchSeen
  * (通知弹窗游标)是两件事:前者决定"提醒过没有",这里决定"看过没有"。
  */
 const WATCH_READ_TID_KEY = 'sdgunWatchReadTids';
 const WATCH_READ_HIT_KEY = 'sdgunWatchReadIds';   // 旧 key:仅用于一次性迁移
-const WATCH_READ_MAX = 2000;
+const WATCH_READ_MAX = 10000;
 
 /* 内存集合 + localStorage 写穿缓存:
  * 已读状态已服务器化(utils/uistate.ts 走 /uistate 同步),localStorage 降级为写穿缓存
@@ -67,7 +69,7 @@ export function loadWatchReadTids(): number[] {
 
 export function saveWatchReadTids(tids: number[]): void {
   const uniq = Array.from(new Set(tids.filter((n) => Number.isFinite(n) && n > 0)));
-  uniq.sort((a, b) => b - a); // 新→旧(tid 单调递增),截断后留下的正是最新的 2000 个
+  uniq.sort((a, b) => b - a); // 新→旧(tid 单调递增),截断后留下的正是最新的 10000 个
   const kept = uniq.slice(0, WATCH_READ_MAX);
   memTids = kept;
   memRaw = JSON.stringify(kept);

@@ -35,6 +35,14 @@ class TestUiStateStore:
         st = s.merge(watch_tids=[5, 1, 4, 2, 3])
         assert st["watch_read_tids"] == [5, 4, 3]    # 最旧(1、2)被裁
 
+    def test_watch_cap_is_10000_keeps_newest_10005(self, tmp_path):
+        """容量 10000(2026-11 由 2000 上调):10005 个 tid 只保最新 10000。"""
+        s = UiStateStore(str(tmp_path))
+        st = s.merge(watch_tids=list(range(1, 10006)))
+        assert len(st["watch_read_tids"]) == 10000
+        assert st["watch_read_tids"][0] == 10005     # 最新在前(数值降序)
+        assert st["watch_read_tids"][-1] == 6        # 只裁掉最旧的 1..5
+
     def test_notify_cap_drops_oldest(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sdgun_uistate, "MAX_NOTIFY_SEEN", 3)
         s = UiStateStore(str(tmp_path))

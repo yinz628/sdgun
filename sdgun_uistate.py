@@ -33,7 +33,7 @@ from sdgun_store import BaseJsonStore
 logger = logging.getLogger("sdgun.uistate")
 
 MAX_NOTIFY_SEEN = 500
-MAX_WATCH_READ = 2000
+MAX_WATCH_READ = 10000
 
 
 def _norm_notify_ids(raw) -> list[str]:
