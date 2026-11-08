@@ -206,8 +206,8 @@ function useNotifyWatcher(me: JsApiUser | null) {
  * 两条互不相干的本地状态：
  *  - sdgunWatchSeen：通知游标（最后已弹过提醒的 hit_id）。本地无游标（首次运行）→
  *    只记基线不弹，避免拿历史命中轰炸用户；之后出现更大的 hit_id 即弹右下角通知。
- *  - sdgunWatchReadTids：已读帖子集合（notify.ts，按 tid）。角标 unseen 直接由"本轮命中
- *    里 tid 未读的数量"算出——持久化在浏览器，刷新页面不再清零，也不会被"打开面板"误清。
+   *  - sdgunWatchReadTids：已读帖子集合（notify.ts，按 tid）。角标 unseen 直接由"本轮命中
+   *    里 tid 未读且非 pre_read 的数量"算出——持久化在浏览器，刷新页面不再清零，也不会被"打开面板"误清。
  *    按 tid 而非 hit_id：同一帖子会因去重/裁剪/重现换 hit_id，阅读属性属于帖子本身。
  *    每轮顺手调用 migrateWatchReadFromHitIds(hits) 把旧 hit_id 已读迁到 tid（幂等，
  *    helpers 不依赖是否打开过抽屉）。
@@ -241,7 +241,9 @@ function useWatchHits(onOpenThread: (tid: number, title: string) => void) {
         const maxId = Number(resp.max_hit_id) || 0;
         // 先迁移旧 key（hit_id → tid），再算角标，否则升级后的首轮会全部显示未读
         migrateWatchReadFromHitIds(hits);
-        setUnseen(hits.filter((h) => !isWatchTidRead(h.tid)).length);
+        // pre_read：摄入时该帖已在服务端已读集合（与 WatchDrawer 同一口径），
+        // 即使本地已读集合被上限淘汰了该 tid 也不计未读，杜绝"已读变回未读"
+        setUnseen(hits.filter((h) => !isWatchTidRead(h.tid) && !h.pre_read).length);
         if (seen == null) {                 // 首轮：静默建立通知游标
           saveSeen(maxId);
           return;

@@ -139,10 +139,12 @@ export default function WatchDrawer({ open, onClose, onWatchRefresh, onOpenThrea
   // (昨天发的帖因新回复会排到 2 小时前的帖上面),所以必须用 publish_time 重排;
   // 旧记录没有该字段(0)→ 回退 created_at。
   // 已读按**帖子 tid** 判断(不是 hit_id):同一帖子换过 hit_id 也不该"变回未读"。
+  // pre_read:摄入时该帖已在服务端已读集合(本地已读集合可能已被上限裁掉该 tid),
+  // 与 readSet 并列计入已读,避免已读帖被淘汰标记后又以未读复活(2026-11)。
   const readSet = new Set(watchReadTids);
   const hitTime = (h: WatchHit) => h.publish_time || h.created_at;
-  const unreadHits = watchHits.filter((h) => !readSet.has(h.tid));
-  const readHits = watchHits.filter((h) => readSet.has(h.tid));
+  const unreadHits = watchHits.filter((h) => !readSet.has(h.tid) && !h.pre_read);
+  const readHits = watchHits.filter((h) => readSet.has(h.tid) || h.pre_read);
   const shownHits = (watchTab === 'unread' ? unreadHits : readHits)
     .slice()
     .sort((a, b) => hitTime(b) - hitTime(a));

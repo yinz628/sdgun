@@ -327,6 +327,56 @@ class TestWatchStore:
         assert s.status()["source"] is None
 
 
+class TestIngestPreRead:
+    """命中摄入时查询服务端已读集合(sdgun_uistate 模块级单例,watch→uistate 无循环
+    依赖,故直接 import 而非钩子注入):tid 已读的新命中带 pre_read=True,前端据此
+    归入已读——即使浏览器本地已读集合因上限淘汰了该 tid,命中也不以未读复活。"""
+
+    def _patch_uistate(self, monkeypatch, tmp_path):
+        import sdgun_uistate
+        ui = sdgun_uistate.UiStateStore(str(tmp_path))
+        monkeypatch.setattr(sdgun_uistate, "store", ui)
+        return ui
+
+    def test_hit_of_read_tid_carries_pre_read(self, tmp_path, monkeypatch):
+        ui = self._patch_uistate(monkeypatch, tmp_path)
+        ui.merge(watch_tids=[4242])          # 用户早已读过该帖(/uistate/seen 上报过)
+        s = WatchStore(str(tmp_path))
+        s.add_rule("", "出")
+        s.ingest([_item(100, "基线")], None)
+        _, hits = s.ingest([_item(200, "出 Glock", type=2, type_value="4242",
+                                  link="")], None)
+        assert len(hits) == 1
+        assert hits[0]["pre_read"] is True
+        # pre_read 随命中记录持久化:代理重启重载后仍在
+        assert WatchStore(str(tmp_path)).list_hits()[0]["pre_read"] is True
+
+    def test_hit_of_unread_tid_has_no_pre_read(self, tmp_path, monkeypatch):
+        self._patch_uistate(monkeypatch, tmp_path)
+        s = WatchStore(str(tmp_path))
+        s.add_rule("", "出")
+        s.ingest([_item(100, "基线")], None)
+        _, hits = s.ingest([_item(200, "出 AK")], None)
+        assert len(hits) == 1
+        assert "pre_read" not in hits[0]     # 未读:不加该键(前后端口径一致)
+
+    def test_uistate_failure_fails_open(self, tmp_path, monkeypatch):
+        """已读查询异常按空集合处理:摄入照常产出命中(不带 pre_read),不拖垮一轮。"""
+        import sdgun_uistate
+
+        class _Boom:
+            def state(self):
+                raise RuntimeError("uistate 不可用")
+
+        monkeypatch.setattr(sdgun_uistate, "store", _Boom())
+        s = WatchStore(str(tmp_path))
+        s.add_rule("", "出")
+        s.ingest([_item(100, "基线")], None)
+        _, hits = s.ingest([_item(200, "出 AK")], None)
+        assert len(hits) == 1
+        assert "pre_read" not in hits[0]
+
+
 class TestPollOnce:
     """poll_once 是"解析源 → 拉流 → 并入本地"的可测单元(fetch/resolve 注入)。"""
 

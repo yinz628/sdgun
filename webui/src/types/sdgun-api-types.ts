@@ -755,6 +755,9 @@ export interface WatchHit {
   keywords: string[]; // 命中的关键字(多规则去重后的并集)
   rule_ids: number[];
   created_at: number; // unix 秒
+  /** 命中摄入时该 tid 已在服务端已读集合(sdgun_watch ingest 查 sdgun_uistate):
+   *  即使本地已读集合因上限淘汰了该 tid,这条命中也按已读分类、不计未读角标 */
+  pre_read?: boolean;
 }
 
 export interface WatchRulesResponse {

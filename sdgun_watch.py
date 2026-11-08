@@ -59,6 +59,9 @@
 (sdgun_session.atomic_write_json);hits ≤ MAX_HITS(1000)按 hit_id FIFO 裁剪、
 seen_ids ≤ MAX_SEEN_IDS(30000,须覆盖最长窗口 48h × 峰值发帖速率)保留最近;
 另按 tid 对命中做兜底去重(见 _hit_tids),防止 seen 被裁剪后老帖重复提醒。
+命中摄入时还会查询 sdgun_uistate 的已读集合(见 _watch_read_tids),tid 已读的
+新命中带 pre_read=True——前端据此把它归入已读,即使浏览器本地已读集合因上限
+淘汰了该 tid,命中也不再以未读复活(2026-11)。
 
 上游 HTTP 一律用 requests(sdgun_session.upstream_client):上游 WAF 校验请求头
 指纹,httpx/aiohttp 的默认头序会被判"登录信息已过期"。
@@ -79,6 +82,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+import sdgun_uistate
 from sdgun_session import (
     MAIN_ORIGIN,
     atomic_write_json,
@@ -152,6 +156,21 @@ def _rule_eligible(create_time, rule: dict) -> bool:
         return True
     created = _to_positive_int(rule.get("created_at"))
     return created is None or pub >= created
+
+
+def _watch_read_tids() -> set[int]:
+    """服务端已读 tid 集合(sdgun_uistate 模块级单例,前端经 POST /uistate/seen 上报)。
+
+    命中摄入时据此给"已读帖子的新命中"打 pre_read 标:该帖早已被用户读过,只是其
+    已读记录后来可能被上限淘汰(2000→10000 只是延缓、不能根除),这条命中不该在前端
+    再以未读复活。watch→uistate 无循环依赖(uistate 只依赖 session/store),故直接
+    import 单例而不是走钩子注入。查询失败按空集合处理——fail-open:宁可偶尔让个别
+    已读帖再弹一次,也不能让已读查询故障中断命中摄入。
+    """
+    try:
+        return set(sdgun_uistate.store.state().get("watch_read_tids") or [])
+    except Exception:  # noqa: BLE001 —— 已读查询失败不能拖垮一轮摄入
+        return set()
 
 
 def _normalize_keywords(raw: Union[str, list, tuple, None]) -> list[str]:
@@ -359,7 +378,9 @@ class WatchStore:
           的条目恒丢弃;
         - initialized=False 时只把 id 记入 seen_ids(建基线,不产生命中);本轮一个 id
           都没记入(全被过滤)时不置 initialized——见下方注释;
-        - 已见 id 不再重复处理;命中按 tid 取 type_value(可转正整数者)否则取 id。
+        - 已见 id 不再重复处理;命中按 tid 取 type_value(可转正整数者)否则取 id;
+        - 新建命中前查一次服务端已读集合(_watch_read_tids):tid 已读的命中带
+          pre_read=True,前端据此归入已读,不以未读复活。
         """
         allowed = set(total_ids) if total_ids else None
         fresh: list[dict] = []
@@ -393,6 +414,8 @@ class WatchStore:
                 self._initialized = True
             now = int(time.time())
             window_sec = int(self._settings.get("window_hours") or DEFAULT_WINDOW_HOURS) * 3600
+            # 本轮新建命中的已读标记口径:每轮查一次服务端已读集合(批量读,别逐条查)
+            pre_read_tids = _watch_read_tids()
             for cid, it in fresh:
                 if _too_old(it.get("create_time"), now, window_sec):
                     continue   # 时间窗外的旧帖只记 seen,不再提醒(防"被算法翻出"误报)
@@ -406,7 +429,8 @@ class WatchStore:
                 # 裁剪、或因换源被 reset_baseline 清空,也不会重复提醒同一条帖子。
                 if tid in self._hit_tids:
                     continue
-                hits.append(self._make_hit_locked(cid, it, matched, tid))
+                hits.append(self._make_hit_locked(cid, it, matched, tid,
+                                                  pre_read=tid in pre_read_tids))
             self._trim_locked()
             self._persist()
         for h in hits:
@@ -445,7 +469,8 @@ class WatchStore:
                 matched.append(r)
         return matched
 
-    def _make_hit_locked(self, cid: int, it: dict, matched: list[dict], tid: int) -> dict:
+    def _make_hit_locked(self, cid: int, it: dict, matched: list[dict], tid: int,
+                         pre_read: bool = False) -> dict:
         keywords: list[str] = []
         rule_ids: list[int] = []
         for r in matched:
@@ -468,6 +493,10 @@ class WatchStore:
             "rule_ids": rule_ids,
             "created_at": int(time.time()),
         }
+        if pre_read:
+            # 摄入时该 tid 已在服务端已读集合:打上标记(未读则不加该键),前端把它
+            # 归入已读分类、不计未读角标——已读记录被上限淘汰后不再以未读复活
+            hit["pre_read"] = True
         self._next_hit_id += 1
         self._hits.append(hit)
         self._hit_tids.add(tid)   # 兜底去重集合随命中记录一起增长
