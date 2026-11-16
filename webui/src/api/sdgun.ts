@@ -189,10 +189,10 @@ export const sdgunApi = {
       .then((r) => r.data as WatchSettingsResponse),
 
   /**
-   * 帖子正文页：服务端解析信封（阶段5 双路过渡）。
-   * 带 sdgun_parsed=1 → 代理剥参转发、服务端提取 var row 并代理化图片，返回
-   * {parsed_row, html}；parsed_row 为 null 时前端回落 extractThreadRow(html)。
-   * 请求整体失败（旧代理不支持该参数等）由调用方回落 fetchThreadHtml。
+   * 帖子正文页：服务端解析信封（解析单源，前端回落已于 2026-11-16 移除）。
+   * 带 sdgun_parsed=1 → 代理剥参转发、服务端（sdgun_parse）提取 var row 并
+   * 代理化图片，返回 {parsed_row, html}；parsed_row 为 null 即提取失败/帖子不可见，
+   * 由调用方按既有空态处理。
    */
   fetchThreadView: (tid: number | string) =>
     getJson<ThreadViewEnvelope>('/mag/circle/v1/forum/threadViewPage', {
@@ -201,15 +201,6 @@ export const sdgunApi = {
       themecolor: '111111',
       sdgun_parsed: 1,
     }),
-
-  /** 帖子正文页原始 HTML（信封不可用时的回落；正文在内嵌 var row.content） */
-  fetchThreadHtml: (tid: number | string) =>
-    api
-      .get<string>('/mag/circle/v1/forum/threadViewPage', {
-        params: { tid, mag_hide_progress: 1, themecolor: '111111' },
-        responseType: 'text',
-      })
-      .then((r) => r.data as string),
 
   /** 帖子打赏记录 */
   rewardRecord: (tid: string | number) =>

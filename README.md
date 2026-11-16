@@ -190,15 +190,15 @@ python deploy/update_dist.py
 - **类型定义**：唯一源为 `webui/src/types/sdgun-api-types.ts`（原根目录副本
   `sdgun-api-types.ts` 与构建期一致性校验脚本 `scripts/check-types-sync.mjs`
   已于 2026-10-29 移除，前端直接引用该文件）。
-- **解析单源化与前端回落（阶段5 双路过渡）**：
-  - `var row` 提取**已单源化**到后端 `sdgun_parse.extract_var_row`（`sdgun_sign` 与
-    `sdgun_proxy` 的 threadViewPage 信封共用同一实现）；前端 `media.ts extractThreadRow`
-    仅作**过渡回落**——`?sdgun_parsed=1` 信封不可用或 `parsed_row=null` 时使用，
-    待观察期后由独立任务移除。
+- **解析单源化（前端回落已于 2026-11-16 移除）**：
+  - `var row` 提取**唯一实现在后端** `sdgun_parse.extract_var_row`（`sdgun_sign` 与
+    `sdgun_proxy` 的 threadViewPage 信封共用同一实现）；前端只消费信封 `parsed_row`
+    （`resolveThreadRow` 仅透传，原 `extractThreadRow` 回落已删），为 null 即提取失败/
+    帖子不可见，由页面按既有空态提示处理。
   - HTML 图片改写：**页面侧已服务端化**（`sdgun_proxy._rewrite_html_images` 改写 WAP 页/
     threadViewPage，信封内再以 `proxify_images` 代理化 var row 的纯字段图片 URL）；
     评论富文本侧仍由前端 `media.ts prepareCommentHtml` 承担（与 DOMPurify 消毒同管线），
-    **有意保留**，不随本次单源化移除。
+    **有意保留**，不随解析单源化移除。
 
 ## 登录机制
 

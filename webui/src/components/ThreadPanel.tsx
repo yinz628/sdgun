@@ -91,14 +91,14 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       void loadComments(tid, 1);
       setContentLoading(true);
       // 站方错误页也是 200 + HTML（含 error 样式表/「您的网络有些问题」文案），
-      // 必须在这里识别，否则会被当成"没有正文"静默吞掉。信封与回落原始 HTML 的
-      // html 字段都经过代理图片改写，识别逻辑一致。
+      // 必须在这里识别，否则会被当成"没有正文"静默吞掉。信封的 html 字段
+      // 已在服务端做过代理图片改写，识别逻辑不受影响。
       const applyEnvelope = (env: ThreadViewEnvelope) => {
         if (env.html.includes('css/user/error-') || env.html.includes('您的网络有些问题')) {
           setContentError(true);
           return;
         }
-        // 阶段5 双路过渡：parsed_row 非空直接用（后端已代理化图片）；为 null 回落前端提取
+        // parsed_row 由后端 sdgun_parse 单源提取（图片已代理化）；null 即提取失败/帖子不可见
         const row: ThreadRowData | null = resolveThreadRow(env);
         setContentHtml(renderRichText(row?.content ?? ''));
         if (row?.user_id) {
@@ -113,14 +113,8 @@ export default function ThreadPanel({ item, onOpenUser }: Props) {
       sdgunApi
         .fetchThreadView(tid)
         .then(applyEnvelope)
-        .catch(async () => {
-          // 信封不可用（旧代理不识别 sdgun_parsed / 网络抖动）→ 回落原始 HTML + 前端提取
-          try {
-            const html = await sdgunApi.fetchThreadHtml(tid);
-            applyEnvelope({ parsed_row: null, html });
-          } catch (e) {
-            toastErr('正文加载失败', e);
-          }
+        .catch((e) => {
+          toastErr('正文加载失败', e);
         })
         .finally(() => setContentLoading(false));
     }
