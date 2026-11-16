@@ -3,7 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip 默认走清华镜像(国内 VPS 拉 PyPI 经常慢到拖死 docker build);
+# ARG 可覆盖,海外构建时 --build-arg PIP_INDEX_URL=https://pypi.org/simple 即可
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
 
 # 代理十模块(sdgun_proxy 依赖 sdgun_session / sdgun_store / sdgun_sign / sdgun_messages / sdgun_likes / sdgun_favorites / sdgun_watch / sdgun_uistate / sdgun_parse)
 COPY sdgun_proxy.py sdgun_session.py sdgun_store.py sdgun_sign.py sdgun_messages.py sdgun_likes.py sdgun_favorites.py sdgun_watch.py sdgun_uistate.py sdgun_parse.py ./
