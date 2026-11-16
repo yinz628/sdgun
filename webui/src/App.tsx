@@ -7,7 +7,7 @@ import UserPanel from './components/UserPanel';
 import OpsForms from './components/OpsForms';
 import { sdgunApi } from './api/sdgun';
 import {
-  NOTIFY_LABEL, fmtEpochSec, isWatchTidRead, migrateWatchReadFromHitIds, tidFromNotifyLink,
+  NOTIFY_LABEL, fmtEpochSec, isWatchTidRead, loadWatchReadTids, migrateWatchReadFromHitIds, tidFromNotifyLink,
 } from './utils/notify';
 import { initUistate, loadNotifySeen, reportNotifySeen } from './utils/uistate';
 import { chatMsgExcerpt } from './utils/chat';
@@ -216,6 +216,8 @@ function useNotifyWatcher(me: JsApiUser | null) {
 function useWatchHits(onOpenThread: (tid: number, title: string) => void) {
   const [unseen, setUnseen] = useState(0);
   const pollRef = useRef<() => Promise<void>>(async () => {});
+  const healing = useRef(false);   // 自愈拉取进行中,防并发重入
+  const healTries = useRef(0);     // 同一"本地为空"窗口内的自愈尝试计数(上限 3)
 
   useEffect(() => {
     let stopped = false;
@@ -241,9 +243,17 @@ function useWatchHits(onOpenThread: (tid: number, title: string) => void) {
         const maxId = Number(resp.max_hit_id) || 0;
         // 先迁移旧 key（hit_id → tid），再算角标，否则升级后的首轮会全部显示未读
         migrateWatchReadFromHitIds(hits);
+        // 本地读集合运行中被清（清站点数据/换设备）时，从服务端拉回并集；上限 3 次防空转，恢复即重置
+        if (hits.length > 0 && loadWatchReadTids().length === 0 && !healing.current && healTries.current < 3) {
+          healing.current = true;
+          healTries.current += 1;
+          try { await initUistate(); } catch { /* 静默,下轮再试(受 healTries 上限约束) */ } finally { healing.current = false; }
+        }
         // pre_read：摄入时该帖已在服务端已读集合（与 WatchDrawer 同一口径），
         // 即使本地已读集合被上限淘汰了该 tid 也不计未读，杜绝"已读变回未读"
         setUnseen(hits.filter((h) => !isWatchTidRead(h.tid) && !h.pre_read).length);
+        // 集合一旦非空即视为恢复,重置计数——下一个"本地为空"窗口仍可自愈 3 次
+        if (loadWatchReadTids().length > 0) healTries.current = 0;
         if (seen == null) {                 // 首轮：静默建立通知游标
           saveSeen(maxId);
           return;
