@@ -19,6 +19,7 @@ import os
 import posixpath
 import shlex
 import sys
+import time
 
 import paramiko
 
@@ -83,11 +84,55 @@ def connect() -> paramiko.SSHClient:
 
 
 def run(ssh, cmd, timeout=120, check=True, quiet=False) -> str:
-    """执行远程命令;check=True 时非零退出码直接终止本地脚本。"""
-    _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
-    out = stdout.read().decode("utf-8", "replace").strip()
-    err = stderr.read().decode("utf-8", "replace").strip()
-    code = stdout.channel.recv_exit_status()
+    """执行远程命令;check=True 时非零退出码直接终止本地脚本。
+
+    流式读实现(2026-11-08 / 11-16 两次部署中断的根因修复):此前 stdout.read()
+    阻塞读,远程命令长时间无输出(如 docker build 里 pip 从 PyPI 慢拉)时单次
+    recv 卡死到 socket timeout 抛 TimeoutError,整个部署崩。现在:
+      - chan.settimeout(30):单次 recv 上限;仅在 recv_ready 时才 recv,实际不触发
+      - 主循环轮询 recv_ready 收尽输出,exit_status_ready 且无残留数据时退出;
+        空闲期 sleep(0.5) 并每 15s 发一次 keepalive,防中间设备掐空闲连接
+      - wall-clock 总时限:超过 timeout 仍未退出则 chan.close() 并抛 RuntimeError
+        (含已收输出尾部 500 字符,便于排障)——不再出现静默 stall
+    """
+    transport = ssh.get_transport()
+    chan = transport.open_session(timeout=12)
+    chan.settimeout(30)
+    chan.exec_command(cmd)
+
+    # 每 15s 保活,防中间设备掐空闲连接(两次 stall 的诱因之一)。paramiko 3.5.1
+    # 无 Transport.send_keepalive(),退化为 set_keepalive(15):packetizer 空闲
+    # 15s 自动发 keepalive 包,效果等同
+    send_keepalive = getattr(transport, "send_keepalive", None)
+    if send_keepalive is None:
+        transport.set_keepalive(15)
+
+    buf: list[str] = []
+    err_buf: list[str] = []
+    deadline = time.monotonic() + timeout
+    last_keepalive = time.monotonic()
+    while True:
+        while chan.recv_ready():
+            buf.append(chan.recv(65536).decode("utf-8", "replace"))
+        while chan.recv_stderr_ready():
+            err_buf.append(chan.recv_stderr(65536).decode("utf-8", "replace"))
+        if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+            break
+        if time.monotonic() >= deadline:
+            chan.close()
+            tail = "".join(buf).strip()[-500:]
+            raise RuntimeError(
+                f"[deploy] 命令超时({timeout}s 未退出,已中止): {cmd[:120]}"
+                + (f"\n    输出尾部: {tail}" if tail else "")
+            )
+        time.sleep(0.5)
+        if send_keepalive is not None and time.monotonic() - last_keepalive >= 15:
+            send_keepalive()
+            last_keepalive = time.monotonic()
+
+    code = chan.recv_exit_status()
+    out = "".join(buf).strip()
+    err = "".join(err_buf).strip()
     if not quiet:
         if out:
             print(f"    {out[:600]}")
